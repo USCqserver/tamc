@@ -65,10 +65,8 @@ impl IndexMut<usize> for IsingState{
     }
 }
 
-impl State for IsingState{
-    type Move = usize;
-
-    fn accept_move(&mut self, mv: Self::Move) {
+impl State<usize> for IsingState{
+    fn accept_move(&mut self, mv: usize) {
         self.arr[mv] *= -1;
     }
 }
@@ -93,9 +91,7 @@ impl BqmIsingInstance{
         return Self{bias, coupling};
     }
 }
-impl Instance for BqmIsingInstance {
-    type St = IsingState;
-    //type Param = ();
+impl Instance<usize, IsingState> for BqmIsingInstance {
     type Energy = f64;
 
     fn energy(&self, state: &IsingState) -> f64 {
@@ -210,10 +206,10 @@ mod tests {
         }
         let betas = geometric_beta_schedule(beta0, betaf, num_betas);
         let samplers: Vec<_> = betas.iter()
-                .map(|&b |MetropolisSampler::new_uniform(b, n))
+                .map(|&b |MetropolisSampler::new_uniform(&instance,b, n))
                 .collect();
-        let pt_sampler = parallel_tempering_sampler::<BqmIsingInstance, Xoshiro256PlusPlus, _>(samplers);
+        let pt_sampler = parallel_tempering_sampler(samplers);
         let mut init_state = PTState::new(init_states);
-        pt_sampler.sweep(&mut init_state, &instance, &mut rng);
+        pt_sampler.sweep(&mut init_state,  &mut rng);
     }
 }

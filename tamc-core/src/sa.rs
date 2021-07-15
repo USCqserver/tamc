@@ -21,15 +21,15 @@ pub fn geometric_beta_schedule(beta0: f64, betaf: f64, num_sweeps: usize) -> Vec
 /// Reference implemenation of simulated annealing
 /// with Metropolis MC
 /// using a single thread and Rng
-pub fn simulated_annealing<I: Instance, Rn: Rng+?Sized, F: FnMut(usize, &Vec<I::St>)>
+pub fn simulated_annealing<St, I: Instance<usize, St>, Rn: Rng+?Sized, F: FnMut(usize, &Vec<St>)>
 (
     instance: &I,
-    init_states: Vec<I::St>,
+    init_states: Vec<St>,
     beta_schedule : &[I::Energy],
     rng: &mut Rn,
     mut measure: F
-) -> Vec<I::St>
-    where I::St: State<Move=usize>, Standard: Distribution<I::Energy>, <I as Instance>::Energy: Copy+Real
+) -> Vec<St>
+    where St: State<usize>, Standard: Distribution<I::Energy>, I::Energy: Copy+Real
 {
     let mut states = init_states;
     let n = instance.size();
@@ -38,11 +38,11 @@ pub fn simulated_annealing<I: Instance, Rn: Rng+?Sized, F: FnMut(usize, &Vec<I::
         return states;
     }
     let init_beta = beta_schedule[0];
-    let sampler = MetropolisSampler::new_uniform(init_beta, n);
+    let sampler = MetropolisSampler::new_uniform(instance, init_beta, n);
     let mut ensemble_sampler = EnsembleSampler::new(sampler);
     for i in 0..num_beta{
         ensemble_sampler.sub_sampler.beta = beta_schedule[i];
-        ensemble_sampler.sweep(&mut states, instance, rng);
+        ensemble_sampler.sweep(&mut states,  rng);
         measure(i, &states);
     }
 

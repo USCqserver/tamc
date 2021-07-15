@@ -12,17 +12,18 @@ impl<S> EnsembleSampler<S>{
 }
 
 
-impl<I: Instance,Rn: ?Sized, S: Sampler<I, Rn> > Sampler<I, Rn> for EnsembleSampler<S>
+impl<Rn: ?Sized, S: Sampler<Rn> >
+Sampler<Rn> for EnsembleSampler<S>
 {
     type SampleType=Vec<S::SampleType>;
     //type ParamType=S::ParamType;
-    fn advance(&self, state: &mut Vec<S::SampleType>, instance: &I, rng: &mut Rn) {
+    fn advance(&self, state: &mut Vec<S::SampleType>, rng: &mut Rn) {
         for xi in state.iter_mut(){
-            self.sub_sampler.sweep(xi, instance,  rng);
+            self.sub_sampler.sweep(xi,  rng);
         }
     }
 
-    fn sweep(&self, state: &mut Vec<S::SampleType>, instance: &I, rng: &mut Rn){
-        self.advance(state,instance, rng);
+    fn sweep(&self, state: &mut Vec<S::SampleType>, rng: &mut Rn){
+        self.advance(state, rng);
     }
 }

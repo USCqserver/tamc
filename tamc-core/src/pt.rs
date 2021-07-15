@@ -2,6 +2,7 @@ use crate::traits::*;
 use rand::Rng;
 use rand::distributions::{Standard, Distribution};
 use num_traits::real::Real;
+use num_traits::Num;
 
 pub struct PTState<St>{
     states: Vec<St>,
@@ -24,30 +25,33 @@ pub struct ParallelTemperingSampler<S, R>{
     delta_beta: Vec<R>
 }
 
-pub fn parallel_tempering_sampler<I: Instance, Rn: ?Sized, S: MacroSampler<I, Rn>>(sampler_chain: Vec<S>)
-        -> ParallelTemperingSampler<S, I::Energy>
+pub fn parallel_tempering_sampler<R, S>(sampler_chain: Vec<S> )
+        -> ParallelTemperingSampler<S, R>
+where
+        S: Macrostate<R>, R: Real
 {
-    let betas : Vec<I::Energy> = sampler_chain.iter().map(|s|s.beta()).collect();
-    let delta_beta : Vec<I::Energy> = betas.iter().skip(1)
+    let betas : Vec<R> = sampler_chain.iter().map(|s|s.beta()).collect();
+    let delta_beta : Vec<R> = betas.iter().skip(1)
             .zip(betas.iter())
             .map(|(&b1, &b2)| b1 - b2).collect();
     return ParallelTemperingSampler{tempering_chain: sampler_chain, delta_beta};
 }
 
 
-impl<I: Instance, R, Rn: Rng+?Sized, S: MacroSampler<I, Rn>> Sampler<I, Rn>
+impl<R, Rn: Rng+?Sized, S: MacroSampler<R, Rn>>
+Sampler<Rn>
 for ParallelTemperingSampler<S, R>
-where R: Real, I:Instance<Energy=R>, Standard: Distribution<R>
+where R: Real, Standard: Distribution<R>
 {
     type SampleType = PTState<S::SampleType>;
     //type ParamType = S::ParamType;
 
-    fn advance(&self, state: &mut PTState<S::SampleType>, instance: &I, rng: &mut Rn) {
+    fn advance(&self, state: &mut PTState<S::SampleType>,  rng: &mut Rn) {
         let n = state.states.len();
         // Apply replica exchange moves
         let energies: Vec<R> = self.tempering_chain.iter()
             .zip(state.states.iter())
-            .map(|(s,x)| s.energy(instance, x))
+            .map(|(s,x)| s.energy( x))
             .collect();
         let delta_es: Vec<R> = energies.iter().skip(1).zip(energies.iter())
             .map(|(&e1, &e2)| e1 - e2)
@@ -61,12 +65,12 @@ where R: Real, I:Instance<Energy=R>, Standard: Distribution<R>
         }
         // Sweep samples
         for (sampler, xi) in self.tempering_chain.iter()
-            .zip(state.states.iter_mut()){
-            sampler.sweep(xi, instance,  rng);
+                .zip(state.states.iter_mut()){
+            sampler.sweep(xi,  rng);
         }
     }
 
-    fn sweep(&self, state: &mut PTState<S::SampleType>, instance: &I,  rng: &mut Rn){
-        self.advance(state, instance, rng);
+    fn sweep(&self, state: &mut PTState<S::SampleType>, rng: &mut Rn){
+        self.advance(state, rng);
     }
 }
