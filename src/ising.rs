@@ -3,16 +3,18 @@ use ndarray::prelude::Array1;
 use num_traits::Num;
 use num_traits::NumAssignOps;
 use num_traits::real::Real;
-use sprs::{CsMat, CsMatBase};
+use sprs::{CsMat, TriMat};
 use crate::{State, Instance};
 use std::ops::{AddAssign, Index, IndexMut};
 use sprs::CompressedStorage::CSR;
 use rand::prelude::*;
 use rand::distributions::Uniform;
 use ndarray::AssignElem;
-
+use crate::util::read_adjacency_list_from_file;
 pub type Spin=i8;
 
+#[derive(Debug, Clone)]
+#[derive()]
 pub struct IsingState{
     pub arr: Array1<Spin>
 }
@@ -89,6 +91,25 @@ impl BqmIsingInstance{
         }
         let bias = Array1::zeros(n1);
         return Self{bias, coupling};
+    }
+    fn from_instance_file(file: &str) -> Self{
+        let adj_list = read_adjacency_list_from_file(file)
+            .expect("Unable to read adjancency from instance file");
+        let n = adj_list.len();
+        let mut tri_mat = TriMat::new((n, n));
+        let mut bias = Array1::zeros(n);
+        for i in 0..n{
+            let neighborhood = &adj_list[i];
+            for (&j, &K) in neighborhood.iter(){
+                if i != j{
+                    tri_mat.add_triplet(i, j, K);
+                } else {
+                    bias[i] = K;
+                }
+            }
+        }
+        let coupling = tri_mat.to_csr();
+        return Self{bias, coupling };
     }
 }
 impl Instance<usize, IsingState> for BqmIsingInstance {

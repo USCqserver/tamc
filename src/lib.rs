@@ -13,6 +13,7 @@
 //!    along with an entropy source
 //!
 //!
+use structopt::StructOpt;
 use num_traits::{Num, Zero};
 use num_traits::real::Real;
 use rand::Rng;
@@ -21,17 +22,25 @@ use rand::distributions::uniform::{SampleUniform, Uniform};
 use std::marker::PhantomData;
 pub use tamc_core::metropolis;
 pub use tamc_core::traits::*;
+use serde::{Serialize, Deserialize};
+pub mod util;
 pub mod ising;
 
-
-
-pub trait GenericSampler<I>{
-
+#[derive(Serialize, Deserialize)]
+pub struct PTOptions{
+    pub icm: bool,
+    pub beta_points: Vec<f64>
 }
-struct ConcreteSampler<I, S>{
-    sub_sampler: S,
-    instance: I
 
+#[derive(Serialize, Deserialize)]
+pub enum Method{
+    PT(PTOptions)
+}
+
+#[derive(StructOpt)]
+pub struct Prog{
+    method_file: String,
+    instance_file: String
 }
 
 #[cfg(test)]

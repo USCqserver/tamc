@@ -10,12 +10,14 @@ members = [
     "tamc-core"
 ]
 [dependencies]
-tamc-core = {path="./tamc-core"}
-sprs = { git="https://github.com/vbarrielle/sprs.git" }
-rand = "0.8.4"
-#rand_distr = "0.4.1"
 ndarray = "0.15.3"
+nom = "6.0"
 num-traits = "0.2.14"
+rand = "0.8.4"
+serde = {version = "1.0", features = ["derive"]}
+sprs = { git="https://github.com/vbarrielle/sprs.git" }
+structopt = "0.3"
+tamc-core = {path="./tamc-core"}
 
 [dev-dependencies]
 rand_xoshiro = "0.6.0"
