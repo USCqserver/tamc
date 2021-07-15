@@ -1,0 +1,21 @@
+[package]
+name = "tamc"
+version = "0.1.0"
+authors = ["hmunozb <humberto.munozb@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[workspace]
+members = [
+    "tamc-core"
+]
+[dependencies]
+tamc-core = {path="./tamc-core"}
+sprs = { git="https://github.com/vbarrielle/sprs.git" }
+rand = "0.8.4"
+#rand_distr = "0.4.1"
+ndarray = "0.15.3"
+num-traits = "0.2.14"
+
+[dev-dependencies]
+rand_xoshiro = "0.6.0"
