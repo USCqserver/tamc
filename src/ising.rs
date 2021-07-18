@@ -1,21 +1,32 @@
+use std::cmp::min;
+use std::fmt::Formatter;
+use std::ops::{AddAssign, Index, IndexMut};
+use std::time;
 
-use ndarray::prelude::Array1;
+use fixedbitset::FixedBitSet;
+use ndarray::AssignElem;
+use ndarray::prelude::*;
 use num_traits::Num;
 use num_traits::NumAssignOps;
 use num_traits::real::Real;
-use serde::{Serialize, Deserialize};
-use sprs::{CsMat, TriMat};
-use crate::{State, Instance};
-use std::ops::{AddAssign, Index, IndexMut};
-use rand::prelude::*;
-use rand::distributions::Uniform;
-use rayon::prelude::*;
-use ndarray::AssignElem;
-use crate::util::read_adjacency_list_from_file;
 use petgraph::csr::Csr;
-use fixedbitset::FixedBitSet;
-use std::fmt::Formatter;
+use rand::distributions::Uniform;
+use rand::prelude::*;
+use rand_xoshiro::Xoshiro256PlusPlus;
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use sprs::{CsMat, TriMat};
+
+use tamc_core::ensembles as ens;
+use tamc_core::metropolis::MetropolisSampler;
+use tamc_core::parallel::ensembles as pens;
+use tamc_core::parallel::pt as ppt;
+use tamc_core::pt as pt;
 use tamc_core::sa::geometric_beta_schedule;
+use tamc_core::traits::*;
+
+use crate::{Instance, State};
+use crate::util::read_adjacency_list_from_file;
 
 pub type Spin=i8;
 
@@ -281,7 +292,8 @@ pub struct PtIcmParams {
     pub warmup_fraction: f64,
     pub beta: BetaOptions,
     pub lo_beta: f64,
-    pub num_replica_chains: u32
+    pub num_replica_chains: u32,
+    pub threads: u32
 }
 
 impl Default for PtIcmParams{
@@ -291,7 +303,8 @@ impl Default for PtIcmParams{
             warmup_fraction: 0.5,
             beta: BetaOptions::Geometric(BetaSpec{beta_min:0.1, beta_max:10.0, num_beta: 8}),
             lo_beta: 1.0,
-            num_replica_chains: 2
+            num_replica_chains: 2,
+            threads: 1
         }
     }
 }
@@ -301,6 +314,220 @@ impl PtIcmParams {
     //
     //     return Ok(())
     // }
+}
+struct PtIcmRunner<'a>{
+    params: &'a PtIcmParams,
+    instance: &'a BqmIsingInstance,
+    g: Csr<(), ()>,
+    beta_vec: Vec<f64>,
+    meas_init: u32,
+    lo_beta_idx: usize
+}
+impl<'a> PtIcmRunner<'a>{
+    pub fn new(instance: &'a BqmIsingInstance, params: &'a PtIcmParams) -> Self
+    {
+        let beta_vec = params.beta.get_beta_arr();
+        let num_betas = beta_vec.len();
+        let beta_arr = Array1::from_vec(beta_vec.clone());
+        let beta_diff : Array1<f64> = beta_arr.slice(s![1..]).to_owned() - beta_arr.slice(s![..-1]);
+        if !beta_diff.iter().all(|&x|x>=0.0) {
+            panic!("beta array must be non-decreasing")
+        }
+        let lo_beta_ref = beta_vec.iter().enumerate().find(|&(_, &b)| b >= params.lo_beta);
+        let lo_beta_idx = match lo_beta_ref{
+            None => {
+                println!("Note: lo_beta={} is out of bounds. The largest beta value will be assigned.", params.lo_beta);
+                num_betas-1
+            }
+            Some((i, _)) => {
+                i
+            }
+        };
+        // Construct csr graph
+        let edges: Vec<_> = instance.coupling.iter()
+                .map(|(_, (i,j))| (i as u32,j as u32)).collect();
+        let g: Csr<(), ()> = Csr::from_sorted_edges(&edges).unwrap();
+
+        let meas_init = (params.warmup_fraction * (params.num_sweeps as f64)) as u32;
+
+        return Self{params, instance, beta_vec, g, meas_init, lo_beta_idx};
+    }
+
+
+    pub fn run_parallel(&self) -> PtIcmMinResults{
+        let m = self.params.num_replica_chains;
+        let num_betas = self.beta_vec.len();
+        // seed and create random number generator
+        let mut rngt = thread_rng();
+        let mut seed_seq = [0u8; 32];
+        rngt.fill_bytes(&mut seed_seq);
+        let mut rng = Xoshiro256PlusPlus::from_seed(seed_seq);
+        // randomly generate initial states
+        let mut pt_state = self.generate_init_state(&mut rng);
+        // generate ensemble rngs
+        let mut rng_vec = Vec::with_capacity(num_betas);
+        for _ in 0..m{
+            let mut rng_chain = Vec::with_capacity(num_betas);
+            for _ in 0..num_betas{
+                rng_chain.push(rng.clone());
+                rng.jump()
+            }
+            rng_vec.push(rng_chain);
+        };
+
+        let mut pt_results = self.parallel_pt_loop(&mut pt_state, &mut rng_vec);
+        self.count_acc(&pt_state, &mut pt_results);
+        return pt_results;
+    }
+
+
+    pub fn run(&self) -> PtIcmMinResults{
+        // seed and create random number generator
+        let mut rngt = thread_rng();
+        let mut seed_seq = [0u8; 32];
+        rngt.fill_bytes(&mut seed_seq);
+        let mut rng = Xoshiro256PlusPlus::from_seed(seed_seq);
+        // randomly generate initial states
+        let mut pt_state = self.generate_init_state(&mut rng);
+        let mut pt_results = self.pt_loop(&mut pt_state, &mut rng);
+        self.count_acc(&pt_state, &mut pt_results);
+        return pt_results;
+    }
+
+    fn parallel_pt_loop<Rn: Rng+Send>(
+        &self, pt_state: &mut Vec<pt::PTState<IsingState>>,
+        rng_vec: &mut Vec<Vec<Rn>>
+    ) -> PtIcmMinResults
+    {
+        // Initialize samplers
+        let n = self.instance.size();
+        let num_betas = self.beta_vec.len();
+        let num_sweeps = self.params.num_sweeps;
+        let samplers: Vec<_> = self.beta_vec.iter()
+            .map(|&b | MetropolisSampler::new_uniform(self.instance,b, n))
+            .collect();
+        let pt_sampler = ppt::parallel_tempering_sampler(samplers);
+        let mut pt_results = PtIcmMinResults::new(num_betas as u32);
+        let mut pt_chains_sampler = pens::ThreadedEnsembleSampler::new(pt_sampler);
+        let mut minimum_e = None;
+        println!("-- PT-ICM begin");
+        let start = time::Instant::now();
+        for i in 0..num_sweeps{
+            self.apply_icm(pt_state, &mut rng_vec[0][0]);
+            pt_chains_sampler.sweep(pt_state, rng_vec);
+            self.apply_measurements(i, &pt_state, &mut minimum_e, &mut pt_results);
+        }
+        let end = start.elapsed();
+        println!("-- PT-ICM Finished");
+        println!("Duration: {:5.4} s", end.as_secs_f64());
+        pt_results.timing = end.as_micros() as f64;
+
+        return pt_results;
+    }
+
+    fn pt_loop<Rn: Rng>(
+        &self, pt_state: &mut Vec<pt::PTState<IsingState>>,
+        rng: &mut Rn
+    ) -> PtIcmMinResults
+    {
+        // Initialize samplers
+        let n = self.instance.size();
+        let num_betas = self.beta_vec.len();
+        let num_sweeps = self.params.num_sweeps;
+        let samplers: Vec<_> = self.beta_vec.iter()
+            .map(|&b | MetropolisSampler::new_uniform(self.instance,b, n))
+            .collect();
+        let pt_sampler = pt::parallel_tempering_sampler(samplers);
+        let mut pt_results = PtIcmMinResults::new(num_betas as u32);
+        let mut pt_chains_sampler = ens::EnsembleSampler::new(pt_sampler);
+        let mut minimum_e = None;
+        println!("-- PT-ICM begin");
+        let start = time::Instant::now();
+        for i in 0..num_sweeps{
+            self.apply_icm(pt_state, rng);
+            pt_chains_sampler.sweep(pt_state, rng);
+            self.apply_measurements(i, &pt_state, &mut minimum_e, &mut pt_results);
+        }
+        let end = start.elapsed();
+        println!("-- PT-ICM Finished");
+        println!("Duration: {:5.4} s", end.as_secs_f64());
+        pt_results.timing = end.as_micros() as f64;
+
+        return pt_results;
+    }
+
+    fn generate_init_state<Rn: Rng+?Sized>(&self, rng: &mut Rn) -> Vec<pt::PTState<IsingState>>{
+        // randomly generate initial states
+        let n = self.instance.size();
+        let num_betas = self.beta_vec.len();
+        let mut pt_state = Vec::new();
+        for _ in 0..self.params.num_replica_chains{
+            let mut init_states = Vec::with_capacity(num_betas);
+            for _ in 0..num_betas{
+                init_states.push(rand_ising_state(n, rng));
+            }
+            pt_state.push(pt::PTState::new(init_states));
+        }
+        return pt_state;
+    }
+
+    fn apply_icm<Rn: Rng+?Sized>(&self, pt_state: &mut Vec<pt::PTState<IsingState>>, rng: &mut Rn)
+        -> Vec<Option<FixedBitSet>>
+    {
+        // Apply ICM move
+        let lo_beta_idx = self.lo_beta_idx;
+        let mut icm_vec = Vec::new();
+        for pt_pairs in pt_state.chunks_exact_mut(2){
+            let (pt0, pt1) = pt_pairs.split_at_mut(1);
+            for (replica1, replica2) in pt0[0].states_mut()[lo_beta_idx..].iter_mut()
+                .zip(pt1[0].states_mut()[lo_beta_idx..].iter_mut()){
+                let icm_cluster = houdayer_cluster_move(
+                    replica1, replica2, &self.g, rng);
+                icm_vec.push(icm_cluster);
+            }
+        }
+        return icm_vec;
+    }
+
+    fn apply_measurements(&self, i: u32, pt_state: & Vec<pt::PTState<IsingState>>,
+                          minimum_e: &mut Option<f64>, pt_results: &mut PtIcmMinResults)
+    {
+        // Measure statistics/lowest energy state so far
+        if i >= self.meas_init {
+            let mut min_energies = Vec::with_capacity(pt_state.len());
+            for pts in pt_state.iter() {
+                let energies : Vec<f64> = pts.states_ref().iter()
+                    .map(|st| self.instance.energy(st)).collect();
+                let (i1, &e1) = energies.iter().enumerate()
+                    .min_by(|&x, &y| x.1.partial_cmp(&y.1).unwrap())
+                    .unwrap();
+                min_energies.push((i1, e1))
+            }
+
+            let (min_e_ch, &(min_idx, min_e)) = min_energies.iter().enumerate()
+                .min_by(|&x, &y| x.1.1.partial_cmp(&y.1.1).unwrap())
+                .unwrap();
+            let chain = pt_state[min_e_ch].states_ref();
+            let min_state = &chain[min_idx];
+
+            if minimum_e.map_or(true, |x| min_e < x) {
+                *minimum_e = Some(min_e);
+                pt_results.gs_states.push(min_state.arr.to_vec());
+                pt_results.gs_energies.push(min_e);
+                pt_results.gs_time_steps.push(i)
+            }
+        }
+    }
+
+    fn count_acc(&self, pt_state: & Vec<pt::PTState<IsingState>>, pt_results: &mut PtIcmMinResults){
+        let mut acceptance_counts = Array1::zeros(self.beta_vec.len());
+        for st in pt_state.iter(){
+            let acc = Array1::from(st.num_acceptances_ref().to_owned());
+            acceptance_counts += &acc;
+        }
+        pt_results.acceptance_counts = acceptance_counts.into_raw_vec();
+    }
+
 }
 pub fn pt_icm_minimize(instance: &BqmIsingInstance,
                        params: &PtIcmParams)
@@ -317,139 +544,29 @@ pub fn pt_icm_minimize(instance: &BqmIsingInstance,
     use tamc_core::parallel::ensembles::ThreadedEnsembleSampler;
 
     println!(" ** Parallel Tempering - ICM **");
-    let pre = Instant::now();
-
-    let n = instance.size();
-    let num_sweeps = params.num_sweeps;
-    let beta_vec = params.beta.get_beta_arr();
-    let num_betas = beta_vec.len();
-    let beta_arr = Array1::from_vec(beta_vec.clone());
-    let beta_diff : Array1<f64> = beta_arr.slice(s![1..]).to_owned() - beta_arr.slice(s![..-1]);
-    if !beta_diff.iter().all(|&x|x>=0.0) {
-        panic!("beta array must be non-decreasing")
-    }
-    let lo_beta_ref = beta_vec.iter().enumerate().find(|&(_, &b)| b >= params.lo_beta);
-    let lo_beta_idx = match lo_beta_ref{
-        None => {
-            println!("Note: lo_beta={} is out of bounds. The largest beta value will be assigned.", params.lo_beta);
-            num_betas-1
-        }
-        Some((i, _)) => {
-            i
-        }
-    };
-
-    // seed and create random number generator
-    let mut rngt = thread_rng();
-    let mut seed_seq = [0u8; 32];
-    rngt.fill_bytes(&mut seed_seq);
-    let mut rng = Xoshiro256PlusPlus::from_seed(seed_seq);
-
-    // Construct csr graph
-    let edges: Vec<_> = instance.coupling.iter().map(|(_, (i,j))| (i as u32,j as u32)).collect();
-    let csr_graph: Csr<(), ()> = Csr::from_sorted_edges(&edges).unwrap();
-
-    // randomly generate initial states
-    let mut pt_state = Vec::new();
-    for _ in 0..params.num_replica_chains{
-        let mut init_states = Vec::with_capacity(num_betas);
-        for _ in 0..num_betas{
-            init_states.push(rand_ising_state(n, &mut rng));
-        }
-        pt_state.push(PTState::new(init_states));
-    }
-    // generate ensemble rngs
-    let mut rng_vec = Vec::with_capacity(num_betas);
-    for _ in 0..params.num_replica_chains{
-        let mut rng_chain = Vec::with_capacity(num_betas);
-        for _ in 0..num_betas{
-            rng_chain.push(rng.clone());
-            rng.jump()
-        }
-        rng_vec.push(rng_chain);
+    let pticm = PtIcmRunner::new(instance, params);
+    return if params.threads > 1 {
+        pticm.run_parallel()
+    } else {
+        pticm.run()
     }
 
-    // Initialize samplers
-    let samplers: Vec<_> = beta_vec.iter()
-        .map(|&b | MetropolisSampler::new_uniform(instance,b, n))
-        .collect();
 
-    let pt_sampler = parallel_tempering_sampler(samplers);
-    let mut pt_results = PtIcmMinResults::new(num_betas as u32);
-    let mut pt_chains_sampler = ThreadedEnsembleSampler::new(pt_sampler);
-    //let mut minimum_state = None;
-    let measurement_start = (params.warmup_fraction * (num_sweeps as f64)) as u32;
-    let mut minimum_e = None;
-    let pre_end = pre.elapsed();
-    println!("-- Preparation duration: {} us", pre_end.as_micros());
-    println!("-- PT-ICM begin");
-    let start = Instant::now();
-    for i in 0..num_sweeps{
-        // Apply ICM move
-        for pt_pairs in pt_state.chunks_exact_mut(2){
-            let (pt0, pt1) = pt_pairs.split_at_mut(1);
-            for (replica1, replica2) in pt0[0].states_mut()[lo_beta_idx..].iter_mut()
-                    .zip(pt1[0].states_mut()[lo_beta_idx..].iter_mut()){
-                let icm_cluster = houdayer_cluster_move(
-                    replica1, replica2,
-                    &csr_graph, &mut rng);
-            }
-        }
-
-        // Sweep the PT chains
-        pt_chains_sampler.sweep(&mut pt_state, &mut rng_vec);
-        // Measure statistics/lowest energy state so far
-        if i >= measurement_start {
-            let mut min_energies = Vec::with_capacity(pt_state.len());
-            for pts in pt_state.iter() {
-                let energies : Vec<f64> = pts.states_ref().iter()
-                    .map(|st| instance.energy(st)).collect();
-                let (i1, &e1) = energies.iter().enumerate()
-                    .min_by(|&x, &y| x.1.partial_cmp(&y.1).unwrap())
-                    .unwrap();
-                min_energies.push((i1, e1))
-            }
-
-            let (min_e_ch, &(min_idx, min_e)) = min_energies.iter().enumerate()
-                .min_by(|&x, &y| x.1.1.partial_cmp(&y.1.1).unwrap())
-                .unwrap();
-            let chain = pt_state[min_e_ch].states_ref();
-            let min_state = &chain[min_idx];
-
-            if minimum_e.map_or(true, |x| min_e < x) {
-                minimum_e = Some(min_e);
-                pt_results.gs_states.push(min_state.arr.to_vec());
-                pt_results.gs_energies.push(min_e);
-                pt_results.gs_time_steps.push(i)
-            }
-        }
-
-    }
-    let end = start.elapsed();
-    println!("-- PT-ICM Finished");
-    println!("Duration: {} us", end.as_micros());
-    let mut acceptance_counts = Array1::zeros(num_betas);
-    for st in pt_state.iter(){
-        let acc = Array1::from(st.num_acceptances_ref().to_owned());
-        acceptance_counts += &acc;
-    }
-    pt_results.acceptance_counts = acceptance_counts.into_raw_vec();
-    pt_results.timing = end.as_micros() as f64;
-    return pt_results;
-    //return ( minimum_state.unwrap().into_raw_vec(), minimum_e.unwrap())
 }
 
 #[cfg(test)]
 mod tests {
     use ndarray::prelude::Array1;
-    use sprs::TriMat;
-    use crate::ising::{BqmIsingInstance, rand_ising_state, pt_icm_minimize, PtIcmParams, BetaOptions};
-    use rand_xoshiro::Xoshiro256PlusPlus;
-    use tamc_core::traits::*;
-    use tamc_core::metropolis::MetropolisSampler;
-    use tamc_core::sa::{simulated_annealing, geometric_beta_schedule};
-    use tamc_core::pt::{parallel_tempering_sampler, PTState};
     use rand::prelude::*;
+    use rand_xoshiro::Xoshiro256PlusPlus;
+    use sprs::TriMat;
+
+    use tamc_core::metropolis::MetropolisSampler;
+    use tamc_core::pt::{parallel_tempering_sampler, PTState};
+    use tamc_core::sa::{geometric_beta_schedule, simulated_annealing};
+    use tamc_core::traits::*;
+
+    use crate::ising::{BetaOptions, BqmIsingInstance, pt_icm_minimize, PtIcmParams, rand_ising_state};
 
     fn make_ising_2d_instance(l: usize) -> BqmIsingInstance{
         let n = l*l;
