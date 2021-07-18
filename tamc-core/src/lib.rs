@@ -4,6 +4,9 @@ pub mod ensembles;
 pub mod pt;
 pub mod sa;
 
+#[cfg(feature = "rayon")]
+pub mod parallel;
+
 #[cfg(test)]
 mod tests {
     #[test]

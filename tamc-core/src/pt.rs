@@ -27,6 +27,9 @@ impl<St> PTState<St>{
     pub fn num_acceptances_ref(&self) -> &[u32]{
         return &self.num_acceptances;
     }
+    pub fn num_acceptances_mut(&mut self) -> &mut [u32]{
+        return &mut self.num_acceptances;
+    }
 }
 /// Implementes the Parallel Tempering algorithm on a vector of macrocanonical samplers
 pub struct ParallelTemperingSampler<S, R>{
