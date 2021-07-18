@@ -39,8 +39,15 @@ pub enum Method{
 
 #[derive(StructOpt)]
 pub struct Prog{
-    method_file: String,
-    instance_file: String
+    pub method_file: String,
+    pub instance_file: String
+}
+
+pub fn run_program(prog: Prog){
+    let method_file = prog.method_file;
+    let instance_file = prog.instance_file;
+    let json_str = std::fs::read_to_string(method_file).unwrap();
+    let opts: Method = serde_json::from_str(&json_str).unwrap();
 }
 
 #[cfg(test)]

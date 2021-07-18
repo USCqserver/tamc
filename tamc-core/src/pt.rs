@@ -6,7 +6,7 @@ use num_traits::Num;
 
 pub struct PTState<St>{
     states: Vec<St>,
-    num_acceptances: Vec<usize>
+    num_acceptances: Vec<u32>
 }
 
 impl<St> PTState<St>{
@@ -15,8 +15,17 @@ impl<St> PTState<St>{
         num_acceptances.resize( states.len(), 0);
         return Self{states, num_acceptances}
     }
-    pub fn into_data(self) -> (Vec<St>, Vec<usize>){
+    pub fn into_data(self) -> (Vec<St>, Vec<u32>){
         return (self.states, self.num_acceptances)
+    }
+    pub fn states_ref(&self) -> &[St]{
+        return &self.states;
+    }
+    pub fn states_mut(&mut self)-> &mut [St]{
+        return &mut self.states;
+    }
+    pub fn num_acceptances_ref(&self) -> &[u32]{
+        return &self.num_acceptances;
     }
 }
 /// Implementes the Parallel Tempering algorithm on a vector of macrocanonical samplers

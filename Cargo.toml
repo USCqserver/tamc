@@ -10,11 +10,14 @@ members = [
     "tamc-core"
 ]
 [dependencies]
-ndarray = "0.15.3"
+fixedbitset = "0.4.0"
+ndarray = {version= "0.15.3", features=["serde"] }
 nom = "6.0"
 num-traits = "0.2.14"
+petgraph = "0.6.0"
 rand = "0.8.4"
 serde = {version = "1.0", features = ["derive"]}
+serde_json = "1.0"
 sprs = { git="https://github.com/vbarrielle/sprs.git" }
 structopt = "0.3"
 tamc-core = {path="./tamc-core"}
