@@ -25,6 +25,8 @@ pub use tamc_core::traits::*;
 use serde::{Serialize, Deserialize};
 pub mod util;
 pub mod ising;
+use std::fs::File;
+use crate::ising::PtIcmParams;
 
 #[derive(Serialize, Deserialize)]
 pub struct PTOptions{
@@ -34,20 +36,33 @@ pub struct PTOptions{
 
 #[derive(Serialize, Deserialize)]
 pub enum Method{
-    PT(PTOptions)
+    PT(PtIcmParams)
 }
 
 #[derive(StructOpt)]
 pub struct Prog{
     pub method_file: String,
-    pub instance_file: String
+    pub instance_file: String,
+    pub output_file: String
 }
 
 pub fn run_program(prog: Prog){
     let method_file = prog.method_file;
     let instance_file = prog.instance_file;
+    let instance = ising::BqmIsingInstance::from_instance_file(&instance_file);
     let json_str = std::fs::read_to_string(method_file).unwrap();
     let opts: Method = serde_json::from_str(&json_str).unwrap();
+    match opts{
+        Method::PT(pt_params) => {
+            let results = ising::pt_icm_minimize(&instance,&pt_params);
+            println!("PT-ICM Done.");
+            println!("** Ground state energy **");
+            println!("  e = {}", results.gs_energies.last().unwrap());
+            let f = File::create(prog.output_file).expect("Failed to create json output file");
+            serde_json::to_writer(f, &results )
+                .expect("Failed to write to json file.")
+        }
+    };
 }
 
 #[cfg(test)]

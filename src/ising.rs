@@ -89,7 +89,7 @@ pub struct BqmIsingInstance{
     coupling: CsMat<f64>
 }
 impl BqmIsingInstance{
-    fn new_zero_bias(coupling: CsMat<f64>) -> Self{
+    pub fn new_zero_bias(coupling: CsMat<f64>) -> Self{
         let (n1, n2) = coupling.shape();
         if n1 != n2{
             panic!("couplings matrix must be square, but has shape {}, {}",n1, n2);
@@ -97,7 +97,7 @@ impl BqmIsingInstance{
         let bias = Array1::zeros(n1);
         return Self{bias, coupling};
     }
-    fn from_instance_file(file: &str) -> Self{
+    pub fn from_instance_file(file: &str) -> Self{
         let adj_list = read_adjacency_list_from_file(file)
             .expect("Unable to read adjancency from instance file");
         let n = adj_list.len();
@@ -221,16 +221,16 @@ impl std::error::Error for PtError { }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PtIcmMinResults{
-    pub gs_states: Vec<Array1<Spin>>,
+    pub gs_states: Vec<Vec<Spin>>,
     pub gs_energies: Vec<f64>,
     pub gs_time_steps: Vec<u32>,
     pub num_measurements: u32,
-    pub acceptance_counts: Array1<u32>
+    pub acceptance_counts: Vec<u32>
 }
 
 impl PtIcmMinResults{
     fn new(num_betas: u32) -> Self{
-        let acceptance_counts = Array1::zeros(num_betas as usize);
+        let acceptance_counts = Array1::zeros(num_betas as usize).into_raw_vec();
         return Self{
             gs_states: Vec::new(),
             gs_energies: Vec::new(),
@@ -272,6 +272,7 @@ impl BetaOptions{
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PtIcmParams {
+    pub num_sweeps: u32,
     pub warmup_fraction: f64,
     pub beta: BetaOptions,
     pub num_replica_chains: u32
@@ -280,6 +281,7 @@ pub struct PtIcmParams {
 impl Default for PtIcmParams{
     fn default() -> Self {
         Self{
+            num_sweeps: 256,
             warmup_fraction: 0.5,
             beta: BetaOptions::Geometric(BetaSpec{beta_min:0.1, beta_max:10.0, num_beta: 8}),
             num_replica_chains: 2
@@ -293,7 +295,7 @@ impl PtIcmParams {
     //     return Ok(())
     // }
 }
-pub fn pt_icm_minimize(instance: &BqmIsingInstance, num_sweeps: u32,
+pub fn pt_icm_minimize(instance: &BqmIsingInstance,
                        params: &PtIcmParams)
                        -> PtIcmMinResults
 {
@@ -304,6 +306,7 @@ pub fn pt_icm_minimize(instance: &BqmIsingInstance, num_sweeps: u32,
     use tamc_core::ensembles::EnsembleSampler;
 
     let n = instance.size();
+    let num_sweeps = params.num_sweeps;
     let beta_vec = params.beta.get_beta_arr();
     let num_betas = beta_vec.len();
     // seed and create random number generator
@@ -366,23 +369,26 @@ pub fn pt_icm_minimize(instance: &BqmIsingInstance, num_sweeps: u32,
 
             if minimum_e.map_or(true, |x| min_e < x) {
                 minimum_e = Some(min_e);
-                pt_results.gs_states.push(min_state.arr.clone());
+                pt_results.gs_states.push(min_state.arr.to_vec());
                 pt_results.gs_energies.push(min_e);
                 pt_results.gs_time_steps.push(i)
             }
         }
 
     }
+    let mut acceptance_counts = Array1::zeros(num_betas);
     for st in pt_state.iter(){
         let acc = Array1::from(st.num_acceptances_ref().to_owned());
-        pt_results.acceptance_counts += &acc;
+        acceptance_counts += &acc;
     }
+    pt_results.acceptance_counts = acceptance_counts.into_raw_vec();
     return pt_results;
     //return ( minimum_state.unwrap().into_raw_vec(), minimum_e.unwrap())
 }
 
 #[cfg(test)]
 mod tests {
+    use ndarray::prelude::Array1;
     use sprs::TriMat;
     use crate::ising::{BqmIsingInstance, rand_ising_state, pt_icm_minimize, PtIcmParams, BetaOptions};
     use rand_xoshiro::Xoshiro256PlusPlus;
@@ -464,13 +470,17 @@ mod tests {
         let mut init_state = PTState::new(init_states);
 
         let mut pt_icm_params = PtIcmParams::default();
+        pt_icm_params.num_sweeps = num_sweeps;
         pt_icm_params.beta = BetaOptions::new_geometric(0.1, 10.0, num_betas as u32);
+        let opts_str = serde_json::to_string_pretty(&pt_icm_params).unwrap();
+        println!("{}", opts_str);
         let beta_arr = pt_icm_params.beta.get_beta_arr();
-        let pt_results = pt_icm_minimize(&instance, num_sweeps, &pt_icm_params);
+        let pt_results = pt_icm_minimize(&instance,  &pt_icm_params);
         for (&e, &t) in pt_results.gs_energies.iter().zip(pt_results.gs_time_steps.iter()){
             println!("t={}, e = {}", t, e)
         }
-        let acc_prob = pt_results.acceptance_counts.map(|&x|(x as f64)/((2*num_sweeps) as f64));
+        let acc_counts = Array1::from_vec(pt_results.acceptance_counts);
+        let acc_prob = acc_counts.map(|&x|(x as f64)/((2*num_sweeps) as f64));
         for (&b, &p) in beta_arr.iter().zip(acc_prob.iter()){
             println!("beta {} : acc_p = {}", b, p)
         }
