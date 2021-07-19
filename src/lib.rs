@@ -25,6 +25,7 @@ pub use tamc_core::traits::*;
 use serde::{Serialize, Deserialize};
 pub mod util;
 pub mod ising;
+pub mod percolation;
 use std::fs::File;
 use crate::ising::PtIcmParams;
 
