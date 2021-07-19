@@ -6,11 +6,11 @@ use petgraph::{EdgeType};
 use petgraph::prelude::*;
 use petgraph::visit::{depth_first_search, DfsEvent, Control, NodeFiltered, Dfs};
 use std::collections::{HashSet, HashMap};
-
+use num_traits::{Num, Signed};
 /// Generate a random top to bottom percolation of the graph
-pub fn random_percolation<E, Rn: Rng+?Sized, D>(graph: &Csr<i8, E, D>, p: f64, rng: &mut Rn)
+pub fn random_percolation<N, E, Rn: Rng+?Sized, D>(graph: &Csr<N, E, D>, p: f64, rng: &mut Rn)
 -> Option<Vec<u32>>
-where D: EdgeType,
+where D: EdgeType, N: Signed + std::cmp::PartialOrd,
 {
     use petgraph::visit::IntoNeighbors;
     let n = graph.node_count();
@@ -18,8 +18,8 @@ where D: EdgeType,
     let rand_bools : Vec<bool> = (0..n).map(|_| rng.sample(d)).collect();
     let filtered_graph = NodeFiltered::from_fn(graph, |n| rand_bools[n as usize]);
     //for n in filtered_graph.
-    let init_nodes : HashSet<u32>= (0..n as u32).filter(|&i| graph[i] < 0 && rand_bools[i as usize]).collect();
-    let tgt_nodes : HashSet<u32>= (0..n as u32).filter(|&i| graph[i] > 0 && rand_bools[i as usize]).collect();
+    let init_nodes : HashSet<u32>= (0..n as u32).filter(|&i| graph[i] < N::zero() && rand_bools[i as usize]).collect();
+    let tgt_nodes : HashSet<u32>= (0..n as u32).filter(|&i| graph[i] > N::zero() && rand_bools[i as usize]).collect();
     if init_nodes.len() == 0 || tgt_nodes.len() == 0{
         return None;
     }
@@ -35,9 +35,6 @@ where D: EdgeType,
                 } else {
                     Control::Continue
                 }
-            },
-            DfsEvent::BackEdge(u, v) =>{
-                Control::Continue
             },
             _ => Control::Continue
         }
@@ -121,5 +118,24 @@ mod tests{
         }
         println!("{}/{}", num_per, iters)
 
+    }
+
+    #[test]
+    fn test_percolation_instance(){
+        let p = 0.8;
+        let iters = 1000;
+        use crate::util::{read_adjacency_list_from_file, adj_list_to_csr};
+        let instance = read_adjacency_list_from_file("./examples/data/qac_L8_FY_perc.txt").unwrap();
+        let csr = adj_list_to_csr(&instance);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(1234);
+
+        let mut num_per = 0;
+        for _ in 0..iters{
+            let path = random_percolation(&csr, p, &mut rng);
+            if path.is_some(){
+                num_per += 1;
+            }
+        }
+        println!("{}/{}", num_per, iters);
     }
 }

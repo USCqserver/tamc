@@ -12,8 +12,8 @@ use nom::combinator::opt;
 use nom::multi::count;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::sequence::{pair, tuple};
-
-
+use petgraph::csr::Csr;
+use petgraph::Undirected;
 
 
 fn parse_u32(s: &str) -> IResult<&str, u32> {
@@ -87,4 +87,19 @@ pub fn read_adjacency_list<R: io::Read>(input: R) -> Result<Vec<BTreeMap<usize, 
     };
 
     Ok(adj_list)
+}
+
+pub fn adj_list_to_csr(adj_list: &Vec<BTreeMap<usize, f64>>) -> Csr<f64, f64, Undirected>{
+    let n = adj_list.len();
+    let mut csr = Csr::with_nodes(n);
+    for (i, l) in adj_list.iter().enumerate(){
+        for (&j, &K) in l.iter(){
+            if i == j{
+                csr[i as u32] = K
+            } else {
+                csr.add_edge(i as u32, j as u32, K);
+            }
+        }
+    }
+    return csr;
 }
