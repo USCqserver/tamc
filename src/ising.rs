@@ -292,6 +292,7 @@ pub struct PtIcmParams {
     pub warmup_fraction: f64,
     pub beta: BetaOptions,
     pub lo_beta: f64,
+    pub icm: bool,
     pub num_replica_chains: u32,
     pub threads: u32
 }
@@ -303,6 +304,7 @@ impl Default for PtIcmParams{
             warmup_fraction: 0.5,
             beta: BetaOptions::Geometric(BetaSpec{beta_min:0.1, beta_max:10.0, num_beta: 8}),
             lo_beta: 1.0,
+            icm: true,
             num_replica_chains: 2,
             threads: 1
         }
@@ -333,6 +335,8 @@ impl<'a> PtIcmRunner<'a>{
         if !beta_diff.iter().all(|&x|x>=0.0) {
             panic!("beta array must be non-decreasing")
         }
+        println!("Temperature (beta) array: ");
+        println!("{:5.4}", beta_arr);
         let lo_beta_ref = beta_vec.iter().enumerate().find(|&(_, &b)| b >= params.lo_beta);
         let lo_beta_idx = match lo_beta_ref{
             None => {
@@ -343,6 +347,12 @@ impl<'a> PtIcmRunner<'a>{
                 i
             }
         };
+        println!("Number of sweeps: {}", params.num_sweeps);
+        if params.icm {
+            println!("Using ICM")
+        } else{
+            println!("ICM Disabled")
+        }
         // Construct csr graph
         let edges: Vec<_> = instance.coupling.iter()
                 .map(|(_, (i,j))| (i as u32,j as u32)).collect();
@@ -474,6 +484,9 @@ impl<'a> PtIcmRunner<'a>{
     fn apply_icm<Rn: Rng+?Sized>(&self, pt_state: &mut Vec<pt::PTState<IsingState>>, rng: &mut Rn)
         -> Vec<Option<FixedBitSet>>
     {
+        if !self.params.icm{
+            return Vec::new();
+        }
         // Apply ICM move
         let lo_beta_idx = self.lo_beta_idx;
         let mut icm_vec = Vec::new();
