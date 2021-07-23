@@ -106,6 +106,13 @@ impl BqmIsingInstance{
         if n1 != n2{
             panic!("couplings matrix must be square, but has shape {}, {}",n1, n2);
         }
+        for (i, row)in coupling.outer_iterator().enumerate(){
+            for (j, &K) in row.iter() {
+                if i == j{
+                    panic!("Expected a zero-bias Csr instance");
+                }
+            }
+        }
         let bias = Array1::zeros(n1);
         return Self{bias, coupling};
     }
@@ -137,11 +144,13 @@ impl Instance<usize, IsingState> for BqmIsingInstance {
         for (i, row)in self.coupling.outer_iterator().enumerate(){
             unsafe {
                 let mut h: f64 = 0.0;
-                h += *self.bias.uget(i) * (*state.arr.uget(i) as f64);
+                let si = state.uget_f64(i);
+                h += *self.bias.uget(i) ;
                 for (j, &K) in row.iter() {
-                    h += (K * (*state.arr.uget(j) as f64)) / 2.0
+                    let sj = state.uget_f64(j);
+                    h += (K * sj) / 2.0
                 }
-                total_energy += h;
+                total_energy += h * si;
             }
         }
         return total_energy;
