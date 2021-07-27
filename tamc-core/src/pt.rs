@@ -1,46 +1,46 @@
 use crate::traits::*;
-use rand::Rng;
-use rand::distributions::{Standard, Distribution};
+use ndarray::prelude::*;
 use num_traits::real::Real;
 use num_traits::Num;
+use rand::Rng;
+use rand::distributions::{Standard, Distribution};
+use serde::{Serialize, Deserialize};
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Serialize, Deserialize)]
 pub enum PTRoundTrip{
     None,
     MinBeta,
     MaxBeta
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PTState<St>{
     pub states: Vec<St>,
-    pub num_acceptances: Vec<u32>,
+    pub num_acceptances: Array1<u32>,
     pub round_trips: u32,
     pub round_trip_tags: Vec<PTRoundTrip>,
-    pub diffusion_hist: Vec<(u32, u32)>
+    pub diffusion_hist: Array2<u32>
 }
 
 impl<St> PTState<St>{
     pub fn new(states: Vec<St>) -> Self{
         let n = states.len();
-        let mut num_acceptances = Vec::with_capacity(n);
+        let num_acceptances = Array1::zeros(n);
+        let diffusion_hist = Array2::zeros((n, 2));
+
         let mut round_trip_tags = Vec::with_capacity(n);
-        let mut diffusion_hist = Vec::with_capacity(n);
-        num_acceptances.resize( n, 0);
         round_trip_tags.resize(n, PTRoundTrip::None);
-        diffusion_hist.resize(n, (0, 0));
         round_trip_tags[0] = PTRoundTrip::MinBeta;
         *round_trip_tags.last_mut().unwrap() = PTRoundTrip::MaxBeta;
         return Self{states, num_acceptances, round_trips: 0, round_trip_tags, diffusion_hist}
     }
     pub fn reset_tags(&mut self){
         let n = self.states.len();
-        self.num_acceptances.clear();
+        self.num_acceptances = Array1::zeros(n);
+        self.diffusion_hist = Array2::zeros((n, 2));
+
         self.round_trip_tags.clear();
-        self.diffusion_hist.clear();
-        self.num_acceptances.resize( n, 0);
         self.round_trip_tags.resize(n, PTRoundTrip::None);
-        self.diffusion_hist.resize(n, (0, 0));
         self.round_trip_tags[0] = PTRoundTrip::MinBeta;
         *self.round_trip_tags.last_mut().unwrap() = PTRoundTrip::MaxBeta;
     }
@@ -50,12 +50,6 @@ impl<St> PTState<St>{
     }
     pub fn states_mut(&mut self)-> &mut [St]{
         return &mut self.states;
-    }
-    pub fn num_acceptances_ref(&self) -> &[u32]{
-        return &self.num_acceptances;
-    }
-    pub fn num_acceptances_mut(&mut self) -> &mut [u32]{
-        return &mut self.num_acceptances;
     }
 }
 /// Implementes the Parallel Tempering algorithm on a vector of macrocanonical samplers
@@ -87,6 +81,9 @@ where R: Real, Standard: Distribution<R>
 
     fn advance(&self, state: &mut PTState<S::SampleType>,  rng: &mut Rn) {
         let n = state.states.len();
+        if self.tempering_chain.len() != n{
+            panic!("ParallelTemperingSampler: Expected a chain of {} states but got {}", n, self.tempering_chain.len());
+        }
         // Apply replica exchange moves
         let energies: Vec<R> = self.tempering_chain.iter()
             .zip(state.states.iter())
@@ -111,14 +108,14 @@ where R: Real, Standard: Distribution<R>
         state.round_trip_tags[0] = PTRoundTrip::MinBeta;
         *state.round_trip_tags.last_mut().unwrap() = PTRoundTrip::MaxBeta;
         // Increment round-trip histogram
-        for (h, &t) in state.diffusion_hist.iter_mut().zip(state.round_trip_tags.iter()){
+        for (mut h, &t) in state.diffusion_hist.axis_iter_mut(Axis(0)).zip(state.round_trip_tags.iter()){
             match t{
                 PTRoundTrip::None => {},
                 PTRoundTrip::MinBeta => {
-                    h.0 += 1;
+                    h[0] += 1;
                 }
                 PTRoundTrip::MaxBeta => {
-                    h.1 += 1;
+                    h[1] += 1;
                 }
             };
         }

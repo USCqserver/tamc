@@ -52,7 +52,7 @@ for ThreadedPTSampler<S, R>
             let dlt: R = self.delta_beta[j]*delta_es[j];
             if dlt >= R::zero() || (rng.sample::<R, _>(Standard) < R::exp(dlt)){
                 state.states_mut().swap(j, j+1);
-                state.num_acceptances_mut()[j] += 1;
+                state.num_acceptances[j] += 1;
             }
         }
         // Sweep samples
