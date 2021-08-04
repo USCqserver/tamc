@@ -27,10 +27,11 @@ use tamc_core::traits::*;
 
 use crate::{Instance, State};
 use crate::util::read_adjacency_list_from_file;
+use tamc_core::pt::PTState;
 
 pub type Spin=i8;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[derive()]
 pub struct IsingState{
     pub arr: Array1<Spin>
@@ -244,12 +245,13 @@ impl std::error::Error for PtError { }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PtIcmMinResults{
-    pub gs_states: Vec<Vec<Spin>>,
-    pub gs_energies: Vec<f64>,
+    pub timing: f64,
     pub gs_time_steps: Vec<u32>,
+    pub gs_energies: Vec<f64>,
+    pub gs_states: Vec<Vec<Spin>>,
     pub num_measurements: u32,
     pub acceptance_counts: Vec<u32>,
-    pub timing: f64
+    //pub final_state: Vec<PTState<IsingState>>
 }
 
 impl PtIcmMinResults{
@@ -261,7 +263,8 @@ impl PtIcmMinResults{
             gs_time_steps: Vec::new(),
             num_measurements: 0,
             acceptance_counts,
-            timing: 0.0
+            timing: 0.0,
+            //final_state: Vec::new()
         };
     }
 }
@@ -373,7 +376,7 @@ impl<'a> PtIcmRunner<'a>{
     }
 
 
-    pub fn run_parallel(&self) -> PtIcmMinResults{
+    pub fn run_parallel(&self) -> (PtIcmMinResults, Vec<PTState<IsingState>>){
         let m = self.params.num_replica_chains;
         let num_betas = self.beta_vec.len();
         // seed and create random number generator
@@ -396,21 +399,25 @@ impl<'a> PtIcmRunner<'a>{
 
         let mut pt_results = self.parallel_pt_loop(&mut pt_state, &mut rng_vec);
         self.count_acc(&pt_state, &mut pt_results);
-        return pt_results;
+        return (pt_results, pt_state);
     }
 
 
-    pub fn run(&self) -> PtIcmMinResults{
+    pub fn run(&self, initial_state: Option<Vec<PTState<IsingState>>>) -> (PtIcmMinResults, Vec<PTState<IsingState>>){
         // seed and create random number generator
         let mut rngt = thread_rng();
         let mut seed_seq = [0u8; 32];
         rngt.fill_bytes(&mut seed_seq);
         let mut rng = Xoshiro256PlusPlus::from_seed(seed_seq);
         // randomly generate initial states
-        let mut pt_state = self.generate_init_state(&mut rng);
+        let mut pt_state = match initial_state{
+            None => self.generate_init_state(&mut rng),
+            Some(st) => { st }
+        };
         let mut pt_results = self.pt_loop(&mut pt_state, &mut rng);
         self.count_acc(&pt_state, &mut pt_results);
-        return pt_results;
+        //pt_results.final_state = pt_state;
+        return (pt_results, pt_state);
     }
 
     fn parallel_pt_loop<Rn: Rng+Send>(
@@ -544,8 +551,7 @@ impl<'a> PtIcmRunner<'a>{
     fn count_acc(&self, pt_state: & Vec<pt::PTState<IsingState>>, pt_results: &mut PtIcmMinResults){
         let mut acceptance_counts = Array1::zeros(self.beta_vec.len());
         for st in pt_state.iter(){
-            let acc = Array1::from(st.num_acceptances_ref().to_owned());
-            acceptance_counts += &acc;
+            acceptance_counts += &st.num_acceptances;
         }
         pt_results.acceptance_counts = acceptance_counts.into_raw_vec();
     }
@@ -555,25 +561,14 @@ pub fn pt_icm_minimize(instance: &BqmIsingInstance,
                        params: &PtIcmParams)
                        -> PtIcmMinResults
 {
-    use std::time::{Instant, Duration};
-    use ndarray::prelude::*;
-    use rand_xoshiro::Xoshiro256PlusPlus;
-    use tamc_core::traits::*;
-    use tamc_core::metropolis::MetropolisSampler;
-    //use tamc_core::pt::*;
-    use tamc_core::parallel::pt::*;
-    //use tamc_core::ensembles::EnsembleSampler;
-    use tamc_core::parallel::ensembles::ThreadedEnsembleSampler;
 
     println!(" ** Parallel Tempering - ICM **");
     let pticm = PtIcmRunner::new(instance, params);
     return if params.threads > 1 {
-        pticm.run_parallel()
+        pticm.run_parallel().0
     } else {
-        pticm.run()
+        pticm.run(None).0
     }
-
-
 }
 
 #[cfg(test)]
