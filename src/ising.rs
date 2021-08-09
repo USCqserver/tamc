@@ -578,38 +578,50 @@ pub fn pt_optimize_beta(
     instances: &Vec<BqmIsingInstance>,
     params: &PtIcmParams,
     num_iters: u32,
-) -> PtIcmParams {
+) -> (PtIcmParams, Array2<f64>) {
     use interp::interp;
     use tamc_core::util::{StepwiseMeasure, finite_differences, monotonic_bisection};
+
     let num_instances = instances.len();
     let mut params = params.clone();
-    let m = params.num_replica_chains;
+    let num_chains = params.num_replica_chains;
+    // Anneal the step-size over num_iters
     let alpha_init = 0.2;
-    let alpha_end = 0.02;
-    //let pticm = PtIcmRunner::new(instance, params);
+    let alpha_end = 0.2;
+
     let mut init_states = Vec::with_capacity(instances.len());
     init_states.resize(instances.len(), None);
     let init_beta_vec = params.beta.get_beta_arr();
-    let mut momentum_beta = Array1::from_vec(init_beta_vec.clone());
+    let nt = init_beta_vec.len();
+    // We use a momentum-directed iteration optimizer
+    let mut momentum_beta = Array1::from_vec(init_beta_vec[1..nt-1].to_vec());
+    let mut tau_hist : Vec<Array1<f64>> = Vec::new();
+
     for i in 0..num_iters {
         let alpha = alpha_init + (i as f64 / (num_iters-1) as f64) * (alpha_end - alpha_init);
         println!("* Iteration {}.\n* Step Size: {}", i, alpha);
+
         let beta_vec = params.beta.get_beta_arr();
-        let n = beta_vec.len();
+
         let beta_meas = StepwiseMeasure::new(beta_vec.clone());
         let beta_weights = Array1::from_vec(beta_meas.weights.clone());
         let beta_arr = Array1::from_vec(beta_vec.clone());
-
+        // Run PT on the current temperature array on all replicas
         let pticm_vec: Vec<PtIcmRunner> = instances.iter()
             .map(|i| PtIcmRunner::new(i, &params)).collect();
         let results: Vec<Vec<PTState<IsingState>>> = pticm_vec.par_iter().zip_eq(init_states.par_iter())
             .map(|(p, s)| p.run(s.clone()).1).collect();
+        // Gather the diffusion histograms for each temperature summed over all replica chains
+        // Also evaluate the round trip times
         let mut dif_probs_vec : Vec<Array1<f64>> = Vec::with_capacity(num_instances);
         let mut tau_vec: Vec<f64> = Vec::with_capacity(num_instances);
         for s in results.iter(){
             let dif_hists : Vec<ArrayView2<u32>>= s.iter().map(|ptstate| ptstate.diffusion_hist.view()).collect();
+            // number of round trips in all replica chains
             let rts : u32 =  s.iter().map(|ptstate| ptstate.round_trips).sum();
-            let tau = if rts == 0 { 0.0 } else { ((m*params.num_sweeps) as f64)/(rts as f64) };
+            let rt_per_rep = rts as f64 / ((num_chains * nt as u32 ) as f64 );
+            // The typical rount-trip time per replica is  num_sweeps / (N_t * \bar{\tau} )
+            let tau = if rts == 0 { 0.0 } else { (params.num_sweeps as f64)/rt_per_rep };
             tau_vec.push(tau);
             let n = dif_hists.len();
             let sh = dif_hists[0].raw_dim();
@@ -629,10 +641,11 @@ pub fn pt_optimize_beta(
         let d_dif_vec : Vec<Array1<f64>> = dif_probs_vec.iter()
             .map(|f| Array1::from_vec(finite_differences(beta_arr.as_slice().unwrap(),f.as_slice().unwrap())) )
             .collect();
-        let mut weighted_d_dif = Array1::zeros(n);
+        let mut weighted_d_dif = Array1::zeros(nt);
         for (&tau, d_dif) in tau_arr.iter().zip(d_dif_vec.iter()){
             weighted_d_dif.scaled_add(tau, d_dif);
         }
+        tau_hist.push(tau_arr);
         println!("Weighed df/dT: {:5.4}", weighted_d_dif);
         let unnorm_eta2 : Array1<f64> = weighted_d_dif / &beta_weights;
         let unnorm_eta = unnorm_eta2.map(|&x| f64::sqrt(x.max(0.0)));
@@ -653,30 +666,32 @@ pub fn pt_optimize_beta(
         let eta_cdf_arr = Array1::from_vec(eta_cdf.clone());
         println!("Eta CDF:\n {:5.4}", eta_cdf_arr);
         let &beta_min = &beta_vec[0];
-        let &beta_max = &beta_vec[n-1];
+        let &beta_max = &beta_vec[nt -1];
         let eta_fn = |x|{
             let beta = beta_min + x * (beta_max-beta_min);
             interp(&beta_vec, &eta_cdf, beta)
         };
-        let xdivs = monotonic_divisions(eta_fn, (n-1) as u32);
+        let xdivs = monotonic_divisions(eta_fn, (nt -1) as u32);
         let xdivs = Array1::from(xdivs);
         let mut beta_divs : Array1<f64> = xdivs*(beta_max - beta_min) + beta_min;
         let calc_beta_divs = beta_divs.clone();
+        // Mean of |log10(b_calc/b_current)|
         let mut err = 0.0;
         println!("Calculated beta:\n{:5.4}", beta_divs);
-        //
-        for (bp, &b1) in momentum_beta.iter_mut().zip(calc_beta_divs.iter()){
-            *bp = f64::exp(0.9 * (*bp).ln() + 0.1*b1.ln());
+        // Update momentum
+        for (bp, &b1) in momentum_beta.iter_mut()
+            .zip(calc_beta_divs.iter().skip(1).take(nt-2)){
+            *bp = f64::exp(0.85 * (*bp).ln() + 0.15*b1.ln());
         }
         println!("Momentum beta:\n{:5.4}", momentum_beta);
 
-        for (b2, (b1, bp)) in beta_divs.iter_mut()
-                .zip(beta_vec.iter().zip(momentum_beta.iter())){
+        for (b2, (b1, bp)) in beta_divs.iter_mut().skip(1).take(nt-2)
+                .zip(beta_vec.iter().skip(1).take(nt-2).zip(momentum_beta.iter())){
             let b = f64::exp(alpha * bp.ln() + (1.0-alpha)*b1.ln());
-            err += f64::abs(b.log10() - b1.log10());
+            err += f64::abs(b2.log10() - b1.log10());
             *b2 = b
         }
-        err /= n as f64;
+        err /= nt as f64;
         println!("Next beta:\n{:5.4}", beta_divs);
         println!("Mean abs log rel_err: {}", err);
 
@@ -689,7 +704,7 @@ pub fn pt_optimize_beta(
                 for r in res.iter_mut(){ r.reset_tags() };
                 Some(res) })
             .collect();
-        if err < 1.0e-3 {
+        if err < 2.0e-2 {
             println!(" ** Relative Error converged");
             break;
         }
@@ -698,7 +713,10 @@ pub fn pt_optimize_beta(
 
     let final_beta = Array1::from_vec(params.beta.get_beta_arr());
     println!("Final temperature array:\n{:6.5}", final_beta);
-    return params;
+    let tau_view : Vec<ArrayView1<f64>> = tau_hist.iter().map(|v|v.view()).collect();
+    let tau_hist_arr = ndarray::stack(Axis(0), &tau_view).unwrap();
+
+    return (params, tau_hist_arr);
 }
 
 #[cfg(test)]
