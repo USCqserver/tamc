@@ -19,10 +19,11 @@ pub fn finite_differences(x: &[f64], y: &[f64]) -> Vec<f64>
 }
 
 pub struct StepwiseMeasure{
-    step_pnts: Vec<f64>
+    pub step_pnts: Vec<f64>,
+    pub weights: Vec<f64>
 }
 impl StepwiseMeasure{
-    pub fn new(step_pnts: Vec<f64>){
+    pub fn new(step_pnts: Vec<f64>) -> Self{
         let n = step_pnts.len();
         let delta_x : Vec<f64> = step_pnts.iter().zip(step_pnts.iter().skip(1))
             .map(|(&x1, &x2)| x2 - x1).collect();
@@ -32,14 +33,16 @@ impl StepwiseMeasure{
         for i in 1..n-1{
             weights[i] = (delta_x[i-1] + delta_x[i])/2.0;
         }
-        weights[n-1] = delta_x[n-2]/2.0
+        weights[n-1] = delta_x[n-2]/2.0;
+
+        return Self{step_pnts, weights}
     }
 }
 
 pub enum BisResult{
     Root((f64, f64)),
-    LoBnd,
-    UpBnd,
+    LoBnd((f64, f64)),
+    UpBnd((f64, f64)),
     Failed
 }
 
@@ -65,19 +68,20 @@ pub fn monotonic_bisection<F: Fn(f64)->f64>(
     for _ in 0..iters_max {
         let xmid = (x0 + x1)/2.0;
         let y = f(xmid);
-        if (xmid - xmin).abs() < tol{
-            return BisResult::LoBnd
-        }
-        if (xmid - xmax).abs() < tol{
-            return BisResult::UpBnd
-        }
         if (y-y0).abs() < tol{
             return BisResult::Root((xmid, y))
         }
+        if (xmid - xmin).abs() < tol{
+            return BisResult::LoBnd((xmid,y))
+        }
+        if (xmid - xmax).abs() < tol{
+            return BisResult::UpBnd((xmid, y))
+        }
+
         if y < y0{
-            x1 = xmid
+            x0 = xmid
         } else {
-            x0 = xmid;
+            x1 = xmid;
         }
     }
 
@@ -93,6 +97,16 @@ fn bisect_array<F: Fn(f64)->f64 + Copy>(f: F, roots: &mut [f64], ytgt: &[f64],
         return;
     } else if roots.len() == 1{
         let y0 = ytgt[0];
+        let bis = monotonic_bisection(f, y0, xmin, xmax,  1.0e-4, 100000);
+        match bis{
+            BisResult::Root((x,y)) => { roots[0] = x;}
+            BisResult::LoBnd((x, y)) => {
+                panic!("Bisection for {} in the interval [{},{}] terminated at the lower bound ({}, {})",
+                       y0, xmin, xmax, x, y)}
+            BisResult::UpBnd((x, y)) => { panic!("Bisection for {} in the  interval [{},{}] terminated at the upper bound ({}, {})",
+                                         y0, xmin, xmax, x, y)}
+            BisResult::Failed => { panic!("Bisection for {} in the  interval [{},{}] failed ", y0, xmin, xmax)}
+        }
         let (x,y) = monotonic_bisection(f, y0, xmin, xmax,  1.0e-4, 10000).unwrap_root();
         roots[0] = x;
     } else {
@@ -106,7 +120,8 @@ fn bisect_array<F: Fn(f64)->f64 + Copy>(f: F, roots: &mut [f64], ytgt: &[f64],
 }
 
 /// divide the domain of a monotonic function f: [0, 1] -> [0, 1]
-/// into intervals [x_k, x_{k+1}] such that f([x_k, x_{k+1}]) = [k/m, (k+1)/m]
+/// into m intervals [x_k, x_{k+1}] such that f([x_k, x_{k+1}]) = [k/m, (k+1)/m]
+/// Returns a vector of length m+1 consisting of {x_k; k=0..m}
 pub fn monotonic_divisions<F>(f: F, m: u32) -> Vec<f64>
 where F : Fn(f64)->f64 + Copy{
     let m = m as usize;

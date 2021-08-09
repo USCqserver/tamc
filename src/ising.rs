@@ -4,6 +4,7 @@ use std::ops::{AddAssign, Index, IndexMut};
 use std::time;
 
 use fixedbitset::FixedBitSet;
+use log::{info, debug, warn};
 use ndarray::AssignElem;
 use ndarray::prelude::*;
 use num_traits::Num;
@@ -28,6 +29,8 @@ use tamc_core::traits::*;
 use crate::{Instance, State};
 use crate::util::read_adjacency_list_from_file;
 use tamc_core::pt::PTState;
+use crate::ising::BetaOptions::Arr;
+use tamc_core::util::monotonic_divisions;
 
 pub type Spin=i8;
 
@@ -347,23 +350,22 @@ impl<'a> PtIcmRunner<'a>{
         if !beta_diff.iter().all(|&x|x>=0.0) {
             panic!("beta array must be non-decreasing")
         }
-        println!("Temperature (beta) array: ");
-        println!("{:5.4}", beta_arr);
+        debug!("Temperature (beta) array:\n\t {:5.4} ", beta_arr);
         let lo_beta_ref = beta_vec.iter().enumerate().find(|&(_, &b)| b >= params.lo_beta);
         let lo_beta_idx = match lo_beta_ref{
             None => {
-                println!("Note: lo_beta={} is out of bounds. The largest beta value will be assigned.", params.lo_beta);
+                warn!("Note: lo_beta={} is out of bounds. The largest beta value will be assigned.", params.lo_beta);
                 num_betas-1
             }
             Some((i, _)) => {
                 i
             }
         };
-        println!("Number of sweeps: {}", params.num_sweeps);
+        info!("Number of sweeps: {}", params.num_sweeps);
         if params.icm {
-            println!("Using ICM")
+            info!("Using ICM")
         } else{
-            println!("ICM Disabled")
+            info!("ICM Disabled")
         }
         // Construct csr graph
         let edges: Vec<_> = instance.coupling.iter()
@@ -436,7 +438,7 @@ impl<'a> PtIcmRunner<'a>{
         let mut pt_results = PtIcmMinResults::new(num_betas as u32);
         let mut pt_chains_sampler = pens::ThreadedEnsembleSampler::new(pt_sampler);
         let mut minimum_e = None;
-        println!("-- PT-ICM begin");
+        info!("-- PT-ICM begin");
         let start = time::Instant::now();
         for i in 0..num_sweeps{
             self.apply_icm(pt_state, &mut rng_vec[0][0]);
@@ -444,8 +446,8 @@ impl<'a> PtIcmRunner<'a>{
             self.apply_measurements(i, &pt_state, &mut minimum_e, &mut pt_results);
         }
         let end = start.elapsed();
-        println!("-- PT-ICM Finished");
-        println!("Duration: {:5.4} s", end.as_secs_f64());
+        info!("-- PT-ICM Finished");
+        info!("Duration: {:5.4} s", end.as_secs_f64());
         pt_results.timing = end.as_micros() as f64;
 
         return pt_results;
@@ -467,7 +469,7 @@ impl<'a> PtIcmRunner<'a>{
         let mut pt_results = PtIcmMinResults::new(num_betas as u32);
         let mut pt_chains_sampler = ens::EnsembleSampler::new(pt_sampler);
         let mut minimum_e = None;
-        println!("-- PT-ICM begin");
+        info!("-- PT-ICM begin");
         let start = time::Instant::now();
         for i in 0..num_sweeps{
             self.apply_icm(pt_state, rng);
@@ -475,8 +477,8 @@ impl<'a> PtIcmRunner<'a>{
             self.apply_measurements(i, &pt_state, &mut minimum_e, &mut pt_results);
         }
         let end = start.elapsed();
-        println!("-- PT-ICM Finished");
-        println!("Duration: {:5.4} s", end.as_secs_f64());
+        info!("-- PT-ICM Finished");
+        info!("Duration: {:5.4} s", end.as_secs_f64());
         pt_results.timing = end.as_micros() as f64;
 
         return pt_results;
@@ -569,6 +571,134 @@ pub fn pt_icm_minimize(instance: &BqmIsingInstance,
     } else {
         pticm.run(None).0
     }
+}
+
+
+pub fn pt_optimize_beta(
+    instances: &Vec<BqmIsingInstance>,
+    params: &PtIcmParams,
+    num_iters: u32,
+) -> PtIcmParams {
+    use interp::interp;
+    use tamc_core::util::{StepwiseMeasure, finite_differences, monotonic_bisection};
+    let num_instances = instances.len();
+    let mut params = params.clone();
+    let m = params.num_replica_chains;
+    let alpha_init = 0.2;
+    let alpha_end = 0.02;
+    //let pticm = PtIcmRunner::new(instance, params);
+    let mut init_states = Vec::with_capacity(instances.len());
+    init_states.resize(instances.len(), None);
+    let init_beta_vec = params.beta.get_beta_arr();
+    let mut momentum_beta = Array1::from_vec(init_beta_vec.clone());
+    for i in 0..num_iters {
+        let alpha = alpha_init + (i as f64 / (num_iters-1) as f64) * (alpha_end - alpha_init);
+        println!("* Iteration {}.\n* Step Size: {}", i, alpha);
+        let beta_vec = params.beta.get_beta_arr();
+        let n = beta_vec.len();
+        let beta_meas = StepwiseMeasure::new(beta_vec.clone());
+        let beta_weights = Array1::from_vec(beta_meas.weights.clone());
+        let beta_arr = Array1::from_vec(beta_vec.clone());
+
+        let pticm_vec: Vec<PtIcmRunner> = instances.iter()
+            .map(|i| PtIcmRunner::new(i, &params)).collect();
+        let results: Vec<Vec<PTState<IsingState>>> = pticm_vec.par_iter().zip_eq(init_states.par_iter())
+            .map(|(p, s)| p.run(s.clone()).1).collect();
+        let mut dif_probs_vec : Vec<Array1<f64>> = Vec::with_capacity(num_instances);
+        let mut tau_vec: Vec<f64> = Vec::with_capacity(num_instances);
+        for s in results.iter(){
+            let dif_hists : Vec<ArrayView2<u32>>= s.iter().map(|ptstate| ptstate.diffusion_hist.view()).collect();
+            let rts : u32 =  s.iter().map(|ptstate| ptstate.round_trips).sum();
+            let tau = if rts == 0 { 0.0 } else { ((m*params.num_sweeps) as f64)/(rts as f64) };
+            tau_vec.push(tau);
+            let n = dif_hists.len();
+            let sh = dif_hists[0].raw_dim();
+            let mut sum_dif_hists = Array2::zeros(sh);
+            for h in dif_hists.iter() {
+                sum_dif_hists += h;
+            }
+            let sum_dif_hists = sum_dif_hists.map(|&x| x as f64);
+            let tots = sum_dif_hists.sum_axis(Axis(1));
+            // n_maxbeta / (n_minbeta + n_maxbeta)
+            let dif_probs = sum_dif_hists.slice(s![.., 1]).to_owned() / tots;
+            dif_probs_vec.push(dif_probs);
+        }
+        println!("(Peek) diffusion distribution: {:5.4}", &dif_probs_vec[0]);
+        let tau_arr = Array1::from_vec(tau_vec);
+        println!("Round-trip times (sweeps):\n{}", tau_arr);
+        let d_dif_vec : Vec<Array1<f64>> = dif_probs_vec.iter()
+            .map(|f| Array1::from_vec(finite_differences(beta_arr.as_slice().unwrap(),f.as_slice().unwrap())) )
+            .collect();
+        let mut weighted_d_dif = Array1::zeros(n);
+        for (&tau, d_dif) in tau_arr.iter().zip(d_dif_vec.iter()){
+            weighted_d_dif.scaled_add(tau, d_dif);
+        }
+        println!("Weighed df/dT: {:5.4}", weighted_d_dif);
+        let unnorm_eta2 : Array1<f64> = weighted_d_dif / &beta_weights;
+        let unnorm_eta = unnorm_eta2.map(|&x| f64::sqrt(x.max(0.0)));
+        // Trapezoid rule correction
+        let unnorm_eta = (unnorm_eta.slice(s![0..-1]).to_owned() + unnorm_eta.slice(s![1..]))/2.0;
+        let z = unnorm_eta.sum();
+        if z < f64::EPSILON{
+            warn!(" ** Insufficient round trips for eta CDF");
+            continue;
+        }
+        let eta_arr : Array1<f64> = &unnorm_eta / z;
+        println!("Eta: {:5.4}", eta_arr);
+        let eta_vec = eta_arr.into_raw_vec();
+        let eta_cdf : Vec<f64>= eta_vec.iter()
+            .scan(0.0, |acc, x|{let acc0 = *acc; *acc += x; Some(acc0)})
+            .chain(std::iter::once(1.0))
+            .collect();
+        let eta_cdf_arr = Array1::from_vec(eta_cdf.clone());
+        println!("Eta CDF:\n {:5.4}", eta_cdf_arr);
+        let &beta_min = &beta_vec[0];
+        let &beta_max = &beta_vec[n-1];
+        let eta_fn = |x|{
+            let beta = beta_min + x * (beta_max-beta_min);
+            interp(&beta_vec, &eta_cdf, beta)
+        };
+        let xdivs = monotonic_divisions(eta_fn, (n-1) as u32);
+        let xdivs = Array1::from(xdivs);
+        let mut beta_divs : Array1<f64> = xdivs*(beta_max - beta_min) + beta_min;
+        let calc_beta_divs = beta_divs.clone();
+        let mut err = 0.0;
+        println!("Calculated beta:\n{:5.4}", beta_divs);
+        //
+        for (bp, &b1) in momentum_beta.iter_mut().zip(calc_beta_divs.iter()){
+            *bp = f64::exp(0.9 * (*bp).ln() + 0.1*b1.ln());
+        }
+        println!("Momentum beta:\n{:5.4}", momentum_beta);
+
+        for (b2, (b1, bp)) in beta_divs.iter_mut()
+                .zip(beta_vec.iter().zip(momentum_beta.iter())){
+            let b = f64::exp(alpha * bp.ln() + (1.0-alpha)*b1.ln());
+            err += f64::abs(b.log10() - b1.log10());
+            *b2 = b
+        }
+        err /= n as f64;
+        println!("Next beta:\n{:5.4}", beta_divs);
+        println!("Mean abs log rel_err: {}", err);
+
+        params.beta = BetaOptions::Arr(beta_divs.into_raw_vec());
+        // let f_arr = results.iter()
+        //     .map(|res| res.final_state.iter().map(|c|))
+        //println!(" Diffusion function");
+        init_states = results.into_iter()
+            .map(|mut res| {
+                for r in res.iter_mut(){ r.reset_tags() };
+                Some(res) })
+            .collect();
+        if err < 1.0e-3 {
+            println!(" ** Relative Error converged");
+            break;
+        }
+        //params.beta = BetaOptions::Arr()
+    }
+
+    let final_beta = Array1::from_vec(params.beta.get_beta_arr());
+    println!("Final temperature array:\n{:6.5}", final_beta);
+    return params;
 }
 
 #[cfg(test)]
