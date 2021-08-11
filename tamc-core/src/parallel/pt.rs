@@ -1,10 +1,11 @@
 use crate::traits::*;
 use rand::Rng;
 use rand::distributions::{Standard, Distribution};
+use ndarray::prelude::*;
 use num_traits::real::Real;
 use num_traits::Num;
 
-pub use crate::pt::{PTState};
+pub use crate::pt::{PTState, PTRoundTrip};
 
 use rayon::prelude::*;
 
@@ -38,7 +39,10 @@ for ThreadedPTSampler<S, R>
     //type ParamType = S::ParamType;
 
     fn advance(&self, state: &mut PTState<S::SampleType>,  rng_vec: &mut Vec<Rn>) {
-        let n = state.states_mut().len();
+        let n = state.states.len();
+        if self.tempering_chain.len() != n{
+            panic!("ParallelTemperingSampler: Expected a chain of {} states but got {}", n, self.tempering_chain.len());
+        }
         // Apply replica exchange moves
         let energies: Vec<R> = self.tempering_chain.iter()
             .zip(state.states_mut().iter())
@@ -51,10 +55,10 @@ for ThreadedPTSampler<S, R>
         for j in 0..n-1{
             let dlt: R = self.delta_beta[j]*delta_es[j];
             if dlt >= R::zero() || (rng.sample::<R, _>(Standard) < R::exp(dlt)){
-                state.states_mut().swap(j, j+1);
-                state.num_acceptances[j] += 1;
+                state.swap_states(j);
             }
         }
+        state.update_round_trips();
         // Sweep samples
         self.tempering_chain.par_iter()
                 .zip(state.states_mut().par_iter_mut())

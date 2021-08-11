@@ -44,6 +44,32 @@ impl<St> PTState<St>{
         self.round_trip_tags[0] = PTRoundTrip::MinBeta;
         *self.round_trip_tags.last_mut().unwrap() = PTRoundTrip::MaxBeta;
     }
+    pub(crate) fn swap_states(&mut self, j: usize){
+        self.states.swap(j, j+1);
+        self.round_trip_tags.swap(j, j+1);
+        self.num_acceptances[j] += 1;
+    }
+    pub(crate) fn update_round_trips(&mut self){
+        if let PTRoundTrip::MaxBeta = self.round_trip_tags[0]{
+            self.round_trips += 1;
+        }
+        // Apply round-trip tags
+        self.round_trip_tags[0] = PTRoundTrip::MinBeta;
+        *self.round_trip_tags.last_mut().unwrap() = PTRoundTrip::MaxBeta;
+        // Increment round-trip histogram
+        for (mut h, &t) in self.diffusion_hist.axis_iter_mut(Axis(0))
+            .zip(self.round_trip_tags.iter()){
+            match t{
+                PTRoundTrip::None => {},
+                PTRoundTrip::MinBeta => {
+                    h[0] += 1;
+                }
+                PTRoundTrip::MaxBeta => {
+                    h[1] += 1;
+                }
+            };
+        }
+    }
 
     pub fn states_ref(&self) -> &[St]{
         return &self.states;
@@ -95,30 +121,10 @@ where R: Real, Standard: Distribution<R>
         for j in 0..n-1{
             let dlt: R = self.delta_beta[j]*delta_es[j];
             if dlt >= R::zero() || (rng.sample::<R, _>(Standard) < R::exp(dlt)){
-                state.states.swap(j, j+1);
-                state.round_trip_tags.swap(j, j+1);
-                state.num_acceptances[j] += 1;
+                state.swap_states(j);
             }
         }
-        // Check for a round trip
-        if let PTRoundTrip::MaxBeta = state.round_trip_tags[0]{
-            state.round_trips += 1;
-        }
-        // Apply round-trip tags
-        state.round_trip_tags[0] = PTRoundTrip::MinBeta;
-        *state.round_trip_tags.last_mut().unwrap() = PTRoundTrip::MaxBeta;
-        // Increment round-trip histogram
-        for (mut h, &t) in state.diffusion_hist.axis_iter_mut(Axis(0)).zip(state.round_trip_tags.iter()){
-            match t{
-                PTRoundTrip::None => {},
-                PTRoundTrip::MinBeta => {
-                    h[0] += 1;
-                }
-                PTRoundTrip::MaxBeta => {
-                    h[1] += 1;
-                }
-            };
-        }
+        state.update_round_trips();
         // Sweep samples
         for (sampler, xi) in self.tempering_chain.iter()
                 .zip(state.states.iter_mut()){
