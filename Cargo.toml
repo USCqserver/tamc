@@ -26,6 +26,7 @@ serde = {version = "1.0", features = ["derive"]}
 serde_yaml = "0.8.17"
 simple_logger = "1.13.0"
 sprs = { git="https://github.com/vbarrielle/sprs.git" }
+svmc-rs = {git="ssh://git@github.com/USCqserver/svmc-rs.git"}
 structopt = "0.3"
 tamc-core = {path="./tamc-core", features=["rayon"]}
 
