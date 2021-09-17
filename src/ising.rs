@@ -839,7 +839,7 @@ mod tests {
         let mut pt_icm_params = PtIcmParams::default();
         pt_icm_params.num_sweeps = num_sweeps;
         pt_icm_params.beta = BetaOptions::new_geometric(0.1, 10.0, num_betas as u32);
-        let opts_str = serde_json::to_string_pretty(&pt_icm_params).unwrap();
+        let opts_str = serde_yaml::to_string(&pt_icm_params).unwrap();
         println!("{}", opts_str);
         let beta_arr = pt_icm_params.beta.get_beta_arr();
         let pt_results = pt_icm_minimize(&instance,  &pt_icm_params);
