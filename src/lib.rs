@@ -24,6 +24,7 @@ use std::error::Error;
 pub use tamc_core::metropolis;
 pub use tamc_core::traits::*;
 use serde::{Serialize, Deserialize};
+pub mod csr;
 pub mod util;
 pub mod ising;
 pub mod percolation;
