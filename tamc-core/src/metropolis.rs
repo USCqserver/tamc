@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 use crate::traits::*;
 use num_traits::{Num, Zero};
+use num_traits::FromPrimitive;
 use num_traits::real::Real;
 use rand::Rng;
 use rand::distributions::{Distribution, Standard};
@@ -32,20 +33,15 @@ impl<'a, R: Real, N, St: State<N>, I: Instance<N, St> > MetropolisSampler<'a, R,
 //         return rng.sample(&self.rand_distr);
 //     }
 // }
-
-impl<'a, R, N, St, I, D: Distribution<N>, Rn: Rng+?Sized> Sampler<Rn>
-for MetropolisSampler<'a, R, N, St, I, D>
-where   I: Instance<N, St, Energy=R>,
-        St: State<N>,
-        Standard: Distribution<R>,
-        R: Real
+impl<'a, R, N, St, I, D: Distribution<N>>
+MetropolisSampler<'a, R, N, St, I, D>
+    where   I: Instance<N, St, Energy=R>,
+            St: State<N>,
+            Standard: Distribution<R>,
+            R: Real
 {
-    type SampleType = St;
-    //type ParamType = I::Param;
-
-    fn advance(&self, state: &mut St, rng: &mut Rn) {
-        let mv = rng.sample(&self.rand_distr);
-        let delta_e = unsafe { self.instance.delta_energy( &*state, &mv) };
+    fn advance_impl<Rn: Rng+?Sized>(&self, mv: N, state: &mut St, rng: &mut Rn){
+        let delta_e = unsafe { self.instance.delta_energy( state, &mv) };
         if delta_e < <I::Energy as Zero>::zero(){
             state.accept_move(mv);
         } else {
@@ -56,10 +52,30 @@ where   I: Instance<N, St, Energy=R>,
             }
         }
     }
+}
+
+
+impl<'a, R, N, St, I, D: Distribution<N>, Rn: Rng+?Sized> Sampler<Rn>
+for MetropolisSampler<'a, R, N, St, I, D>
+where   I: Instance<N, St, Energy=R>,
+        St: State<N>,
+        Standard: Distribution<R>,
+        R: Real,
+        N: Num + FromPrimitive
+{
+    type SampleType = St;
+    //type ParamType = I::Param;
+
+    fn advance(&self, state: &mut St, rng: &mut Rn) {
+        let mv = rng.sample(&self.rand_distr);
+        self.advance_impl(mv, state, rng);
+    }
+
     fn sweep(&self, state: &mut St, rng: &mut Rn){
         let n = self.instance.size();
-        for _ in 0..n{
-            self.advance(state, rng);
+        for i in 0..n{
+            let mv = N::from_usize(i).unwrap();
+            self.advance_impl(mv, state, rng);
         }
     }
 }
@@ -76,7 +92,7 @@ where   I: Instance<N, St, Energy=R>,
         return self.beta;
     }
 
-    fn energy(&self, st: &St) -> R {
+    fn energy(&self, st: &mut St) -> R {
         return self.instance.energy(st);
     }
 }

@@ -16,8 +16,8 @@ pub trait Instance<Mv, St: State<Mv>>{
     //type Param: Copy;
     type Energy: Real;
     /// Evaluate the energy
-    fn energy(&self, state: &St) -> Self::Energy;
-    unsafe fn delta_energy(&self, state: &St, mv: &Mv) -> Self::Energy;
+    fn energy(&self, state: &mut St) -> Self::Energy;
+    unsafe fn delta_energy(&self, state: &mut St, mv: &Mv) -> Self::Energy;
     fn size(&self) -> usize;
 }
 
@@ -42,7 +42,7 @@ pub trait Sampler<Rn: ?Sized>{
 pub trait Macrostate<R>{
     type Microstate;
     fn beta(&self) -> R;
-    fn energy(&self, st: &Self::Microstate) -> R;
+    fn energy(&self, st: &mut Self::Microstate) -> R;
 }
 
 pub trait MacroSampler<R,  Rn: ?Sized>: Sampler<Rn> + Macrostate<R, Microstate=<Self as Sampler<Rn>>::SampleType>{

@@ -112,7 +112,7 @@ where R: Real, Standard: Distribution<R>
         }
         // Apply replica exchange moves
         let energies: Vec<R> = self.tempering_chain.iter()
-            .zip(state.states.iter())
+            .zip(state.states.iter_mut())
             .map(|(s,x)| s.energy( x))
             .collect();
         let delta_es: Vec<R> = energies.iter().skip(1).zip(energies.iter())

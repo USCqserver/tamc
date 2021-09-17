@@ -34,11 +34,17 @@ use tamc_core::util::monotonic_divisions;
 
 pub type Spin=i8;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[derive()]
 pub struct IsingState{
-    pub arr: Array1<Spin>
+    pub arr: Array1<Spin>,
+    #[serde(skip)]
+    pub energy: f64,
+    #[serde(skip)]
+    delta_e_cache: f64,
+    energy_init: bool
 }
+
 impl IsingState{
     /// Fast access and convert to f64 spin by simply checking the sign
     #[inline]
@@ -49,6 +55,11 @@ impl IsingState{
         } else {
             -1.0
         }
+    }
+    /// Fast access and convert to f64 spin by simply checking the sign
+    #[inline]
+    pub unsafe fn uget(&self, index: usize) -> i8{
+        return *self.arr.uget(index);
     }
     /// Access and flip the sign of the spin
     #[inline]
@@ -77,13 +88,15 @@ impl IsingState{
     }
 }
 
-pub fn rand_ising_state<Rn: Rng+?Sized>(n: usize, rng: &mut Rn) -> IsingState{
+pub fn rand_ising_state<I: Instance<usize, IsingState>, Rn: Rng+?Sized>(n: usize, instance: &I, rng: &mut Rn) -> IsingState{
     let mut arr = Array1::uninit(n);
     for s in arr.iter_mut(){
         s.assign_elem( 2*rng.sample(Uniform::new_inclusive(0, 1)) - 1);
     }
     let arr = unsafe { arr.assume_init() };
-    return IsingState{arr};
+    let mut ising_state = IsingState{arr, energy: 0.0, delta_e_cache: 0.0, energy_init: false};
+    instance.energy(&mut ising_state);
+    return ising_state;
 }
 
 impl Index<usize> for IsingState{
@@ -103,6 +116,7 @@ impl IndexMut<usize> for IsingState{
 impl State<usize> for IsingState{
     fn accept_move(&mut self, mv: usize) {
         self.arr[mv] *= -1;
+        self.energy += self.delta_e_cache;
     }
 }
 
@@ -155,7 +169,10 @@ impl BqmIsingInstance{
 impl Instance<usize, IsingState> for BqmIsingInstance {
     type Energy = f64;
 
-    fn energy(&self, state: &IsingState) -> f64 {
+    fn energy(&self, state: &mut IsingState) -> f64 {
+        if state.energy_init{
+            return state.energy;
+        }
         let mut total_energy = 0.0;
         for (i, row)in self.coupling.outer_iterator().enumerate(){
             unsafe {
@@ -169,13 +186,15 @@ impl Instance<usize, IsingState> for BqmIsingInstance {
                 total_energy += h * si;
             }
         }
+        state.energy = total_energy;
+        state.energy_init = true;
         return total_energy;
     }
 
     /// The \Delta E of a move proposal to flip spin i is
     ///   H(-s_i) - H(s_i) = -2 h_i s_i - \sum_j J_{ij} s_i s_j
     /// Safe only if the move is within the size of the state
-    unsafe fn delta_energy(&self, state: &IsingState, mv: &usize) -> f64 {
+    unsafe fn delta_energy(&self, state: &mut IsingState, mv: &usize) -> f64 {
         let mut delta_e = 0.0;
         let &i = mv;
         let si = state.uget_f64(i);
@@ -184,6 +203,7 @@ impl Instance<usize, IsingState> for BqmIsingInstance {
         for (j, &K) in row.iter(){
             delta_e  += - K * si * state.uget_f64(j)
         }
+        state.delta_e_cache = delta_e;
         return delta_e;
     }
 
@@ -455,7 +475,7 @@ impl<'a> PtIcmRunner<'a>{
         for i in 0..num_sweeps{
             self.apply_icm(pt_state, &mut rng_vec[0][0]);
             pt_chains_sampler.sweep(pt_state, rng_vec);
-            self.apply_measurements(i, &pt_state, &mut minimum_e, &mut pt_results);
+            self.apply_measurements(i, pt_state, &mut minimum_e, &mut pt_results);
         }
         let end = start.elapsed();
         info!("-- PT-ICM Finished");
@@ -486,7 +506,7 @@ impl<'a> PtIcmRunner<'a>{
         for i in 0..num_sweeps{
             self.apply_icm(pt_state, rng);
             pt_chains_sampler.sweep(pt_state, rng);
-            self.apply_measurements(i, &pt_state, &mut minimum_e, &mut pt_results);
+            self.apply_measurements(i, pt_state, &mut minimum_e, &mut pt_results);
         }
         let end = start.elapsed();
         info!("-- PT-ICM Finished");
@@ -504,7 +524,7 @@ impl<'a> PtIcmRunner<'a>{
         for _ in 0..self.params.num_replica_chains{
             let mut init_states = Vec::with_capacity(num_betas);
             for _ in 0..num_betas{
-                init_states.push(rand_ising_state(n, rng));
+                init_states.push(rand_ising_state(n, self.instance, rng));
             }
             pt_state.push(pt::PTState::new(init_states));
         }
@@ -532,14 +552,14 @@ impl<'a> PtIcmRunner<'a>{
         return icm_vec;
     }
 
-    fn apply_measurements(&self, i: u32, pt_state: & Vec<pt::PTState<IsingState>>,
+    fn apply_measurements(&self, i: u32, pt_state: &mut Vec<pt::PTState<IsingState>>,
                           minimum_e: &mut Option<f64>, pt_results: &mut PtIcmMinResults)
     {
         // Measure statistics/lowest energy state so far
         if i >= self.meas_init {
             let mut min_energies = Vec::with_capacity(pt_state.len());
-            for pts in pt_state.iter() {
-                let energies : Vec<f64> = pts.states_ref().iter()
+            for pts in pt_state.iter_mut() {
+                let energies : Vec<f64> = pts.states_mut().iter_mut()
                     .map(|st| self.instance.energy(st)).collect();
                 let (i1, &e1) = energies.iter().enumerate()
                     .min_by(|&x, &y| x.1.partial_cmp(&y.1).unwrap())
@@ -777,14 +797,14 @@ mod tests {
 
         let mut init_states = Vec::with_capacity(ensemble_size);
         for _ in 0..ensemble_size{
-            init_states.push(rand_ising_state(n, &mut rng));
+            init_states.push(rand_ising_state(n, &instance, &mut rng));
         }
 
         let beta_schedule = geometric_beta_schedule(beta0, betaf, num_sweeps);
 
         //sampler.advance();
-        let states = simulated_annealing(&instance, init_states, &beta_schedule, &mut rng, |_i, _|{} );
-        for st in states.iter(){
+        let mut states = simulated_annealing(&instance, init_states, &beta_schedule, &mut rng, |_i, _|{} );
+        for st in states.iter_mut(){
             let mz = st.mag();
             let e = instance.energy(st);
             println!("mz = {}", mz);
@@ -807,7 +827,7 @@ mod tests {
         let instance = make_ising_2d_instance(l);
         let mut init_states = Vec::with_capacity(num_betas);
         for _ in 0..num_betas{
-            init_states.push(rand_ising_state(n, &mut rng));
+            init_states.push(rand_ising_state(n, &instance, &mut rng));
         }
         let betas = geometric_beta_schedule(beta0, betaf, num_betas);
         let samplers: Vec<_> = betas.iter()
