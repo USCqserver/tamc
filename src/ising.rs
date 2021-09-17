@@ -63,6 +63,18 @@ impl IsingState{
         }
         return m;
     }
+
+    pub fn as_binary_string(&self) -> String{
+        let mut s = std::string::String::with_capacity(self.arr.len());
+        for &si in self.arr.iter(){
+            if si > 0 { // match +1 to 0
+                s.push('0');
+            } else {  // match -1 to 1
+                s.push('1');
+            }
+        }
+        return s;
+    }
 }
 
 pub fn rand_ising_state<Rn: Rng+?Sized>(n: usize, rng: &mut Rn) -> IsingState{
