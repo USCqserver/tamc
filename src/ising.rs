@@ -192,7 +192,7 @@ impl Instance<usize, IsingState> for BqmIsingInstance {
     }
 
     /// The \Delta E of a move proposal to flip spin i is
-    ///   H(-s_i) - H(s_i) = -2 h_i s_i - \sum_j J_{ij} s_i s_j
+    ///   H(-s_i) - H(s_i) = -2 h_i s_i - 2 \sum_j J_{ij} s_i s_j
     /// Safe only if the move is within the size of the state
     unsafe fn delta_energy(&self, state: &mut IsingState, mv: &usize) -> f64 {
         let mut delta_e = 0.0;
@@ -201,7 +201,7 @@ impl Instance<usize, IsingState> for BqmIsingInstance {
         delta_e += -2.0 * si * self.bias.uget(i);
         let row = self.coupling.outer_view(i).unwrap();
         for (j, &K) in row.iter(){
-            delta_e  += - K * si * state.uget_f64(j)
+            delta_e  += - 2.0 * K * si * state.uget_f64(j)
         }
         state.delta_e_cache = delta_e;
         return delta_e;
@@ -256,8 +256,11 @@ fn houdayer_cluster_move<R: Rng+?Sized>(replica1: &mut IsingState, replica2: &mu
     //println!("cluster size = {}", cluster_size);
     // Finally, swap all
     for i in nodes.ones(){
-        unsafe { std::mem::swap(&mut replica1.arr.uget_mut(i), &mut replica2.arr.uget_mut(i)); }
+        unsafe { std::mem::swap(replica1.arr.uget_mut(i),  replica2.arr.uget_mut(i)); }
     }
+    // Invalidate energy caches
+    replica1.energy_init=false;
+    replica2.energy_init=false;
     return Some(nodes);
 }
 
