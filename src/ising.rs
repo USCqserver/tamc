@@ -283,6 +283,7 @@ impl std::error::Error for PtError { }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PtIcmMinResults{
+    pub params: PtIcmParams,
     pub timing: f64,
     pub gs_time_steps: Vec<u32>,
     pub gs_energies: Vec<f64>,
@@ -293,9 +294,10 @@ pub struct PtIcmMinResults{
 }
 
 impl PtIcmMinResults{
-    fn new(num_betas: u32) -> Self{
+    fn new(params: PtIcmParams, num_betas: u32) -> Self{
         let acceptance_counts = Array1::zeros(num_betas as usize).into_raw_vec();
         return Self{
+            params,
             gs_states: Vec::new(),
             gs_energies: Vec::new(),
             gs_time_steps: Vec::new(),
@@ -470,7 +472,7 @@ impl<'a> PtIcmRunner<'a>{
             .map(|&b | MetropolisSampler::new_uniform(self.instance,b, n))
             .collect();
         let pt_sampler = ppt::parallel_tempering_sampler(samplers);
-        let mut pt_results = PtIcmMinResults::new(num_betas as u32);
+        let mut pt_results = PtIcmMinResults::new(self.params.clone(),num_betas as u32);
         let mut pt_chains_sampler = pens::ThreadedEnsembleSampler::new(pt_sampler);
         let mut minimum_e = None;
         info!("-- PT-ICM begin");
@@ -501,7 +503,7 @@ impl<'a> PtIcmRunner<'a>{
             .map(|&b | MetropolisSampler::new_uniform(self.instance,b, n))
             .collect();
         let pt_sampler = pt::parallel_tempering_sampler(samplers);
-        let mut pt_results = PtIcmMinResults::new(num_betas as u32);
+        let mut pt_results = PtIcmMinResults::new(self.params.clone(),num_betas as u32);
         let mut pt_chains_sampler = ens::EnsembleSampler::new(pt_sampler);
         let mut minimum_e = None;
         info!("-- PT-ICM begin");
