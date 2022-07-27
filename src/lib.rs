@@ -76,13 +76,15 @@ pub enum Method{
 pub struct Prog{
     pub method_file: String,
     pub instance_file: String,
-    pub output_file: String
+    pub output_file: String,
+    #[structopt(long)]
+    pub qubo: bool
 }
 
 pub fn run_program(prog: Prog) -> Result<(), Box<dyn Error>>{
     let method_file = prog.method_file;
     let instance_file = prog.instance_file;
-    let instance = ising::BqmIsingInstance::from_instance_file(&instance_file);
+    let instance = ising::BqmIsingInstance::from_instance_file(&instance_file, prog.qubo);
     let yaml_str = std::fs::read_to_string(&method_file)
         .map_err(|e| PTError::IoError(e, method_file.to_string() ))?;
     let opts: Method = serde_yaml::from_str(&yaml_str)

@@ -127,6 +127,7 @@ impl State<usize> for IsingState{
 ///
 /// where $h_i$ are the biases and $J_{ij}$ are the couplings
 pub struct BqmIsingInstance{
+    offset: f64,
     bias: Array1<f64>,
     coupling: CsMat<f64>
 }
@@ -144,26 +145,47 @@ impl BqmIsingInstance{
             }
         }
         let bias = Array1::zeros(n1);
-        return Self{bias, coupling};
+        return Self{offset: 0.0, bias, coupling};
     }
-    pub fn from_instance_file(file: &str) -> Self{
+    pub fn from_instance_file(file: &str, qubo: bool) -> Self{
         let adj_list = read_adjacency_list_from_file(file)
             .expect("Unable to read adjancency from instance file");
         let n = adj_list.len();
+        let mut offset = 0.0;
         let mut tri_mat = TriMat::new((n, n));
         let mut bias = Array1::zeros(n);
         for i in 0..n{
             let neighborhood = &adj_list[i];
             for (&j, &K) in neighborhood.iter(){
-                if i != j{
-                    tri_mat.add_triplet(i, j, K);
+                if qubo{
+                    if i != j {
+                        offset += K / 8.0;
+                        tri_mat.add_triplet(i, j, K/4.0);
+                        bias[i] += K / 4.0;
+                    } else {
+                        offset += K / 2.0;
+                        bias[i] += K / 2.0;
+                    }
                 } else {
-                    bias[i] = K;
+                    if i != j {
+                        tri_mat.add_triplet(i, j, K);
+                    } else {
+                        bias[i] = K;
+                    }
                 }
             }
         }
         let coupling = tri_mat.to_csr();
-        return Self{bias, coupling };
+        return Self{offset, bias, coupling };
+    }
+
+    pub fn to_csr_graph(&self) -> Csr<(), ()>{
+        // Construct csr graph
+        let edges: Vec<_> = self.coupling.iter()
+            .map(|(_, (i,j))| (i as u32,j as u32)).collect();
+        let g: Csr<(), ()> = Csr::from_sorted_edges(&edges).unwrap();
+
+        return g;
     }
 }
 impl Instance<usize, IsingState> for BqmIsingInstance {
@@ -173,7 +195,7 @@ impl Instance<usize, IsingState> for BqmIsingInstance {
         if state.energy_init{
             return state.energy;
         }
-        let mut total_energy = 0.0;
+        let mut total_energy = self.offset;
         for (i, row)in self.coupling.outer_iterator().enumerate(){
             unsafe {
                 let mut h: f64 = 0.0;
