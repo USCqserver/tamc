@@ -78,12 +78,15 @@ pub struct Prog{
     pub instance_file: String,
     pub output_file: String,
     #[structopt(long)]
+    pub sample_output: Option<String>,
+    #[structopt(long)]
     pub qubo: bool
 }
 
 pub fn run_program(prog: Prog) -> Result<(), Box<dyn Error>>{
     let method_file = prog.method_file;
     let instance_file = prog.instance_file;
+    let sample_output = prog.sample_output.unwrap_or("samples.pkl".to_string());
     let instance = ising::BqmIsingInstance::from_instance_file(&instance_file, prog.qubo);
     let yaml_str = std::fs::read_to_string(&method_file)
         .map_err(|e| PTError::IoError(e, method_file.to_string() ))?;
@@ -92,14 +95,29 @@ pub fn run_program(prog: Prog) -> Result<(), Box<dyn Error>>{
 
     match opts{
         Method::PT(pt_params) => {
-            let results = ising::pt_icm_minimize(&instance,&pt_params);
+            //let results = ising::pt_icm_minimize(&instance,&pt_params);
+            println!(" ** Parallel Tempering - ICM **");
+            let pticm = ising::PtIcmRunner::new(&instance, &pt_params);
+            let results = if pt_params.threads > 1 {
+                pticm.run_parallel()
+            } else {
+                pticm.run(None)
+            };
+            let (gs_results, samp_results, _) = results;
             println!("PT-ICM Done.");
             println!("** Ground state energy **");
-            println!("  e = {}", results.gs_energies.last().unwrap());
-            let f = File::create(prog.output_file)
-                .expect("Failed to create yaml output file");
-            serde_yaml::to_writer(f, &results )
-                .expect("Failed to write to yaml file.")
+            println!("  e = {}", gs_results.gs_energies.last().unwrap());
+            {
+                let f = File::create(prog.output_file)
+                    .expect("Failed to create yaml output file");
+                serde_yaml::to_writer(f, &gs_results)
+                    .expect("Failed to write to yaml file.")
+            }
+            {
+                let mut f = File::create(sample_output)
+                    .expect("Failed to create sample output file");
+                serde_pickle::to_writer(&mut f, &samp_results, serde_pickle::SerOptions::default());
+            }
         }
     };
     Ok(())

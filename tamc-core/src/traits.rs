@@ -16,6 +16,7 @@ pub trait Instance<Mv, St: State<Mv>>{
     //type Param: Copy;
     type Energy: Real;
     /// Evaluate the energy
+    fn energy_ref(&self, state: &St) -> Self::Energy;
     fn energy(&self, state: &mut St) -> Self::Energy;
     unsafe fn delta_energy(&self, state: &mut St, mv: &Mv) -> Self::Energy;
     fn size(&self) -> usize;

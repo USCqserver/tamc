@@ -17,6 +17,7 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sprs::{CsMat, TriMat};
+use itertools::Itertools;
 
 use tamc_core::ensembles as ens;
 use tamc_core::metropolis::MetropolisSampler;
@@ -85,6 +86,30 @@ impl IsingState{
             }
         }
         return s;
+    }
+
+    pub fn as_bytes(&self) -> Vec<u64>{
+        let n = self.arr.len();
+        let num_bytes = n/64 + (if n%64 == 0{ 0 } else { 1 });
+        let mut bytes_vec: Vec<u64> =(&[0]).repeat(num_bytes);
+        for (i, &si) in self.arr.iter().enumerate(){
+            let bi = i / 64;
+            let k = i % 64;
+            unsafe {
+                let b = bytes_vec.get_unchecked_mut(bi);
+                *b |= ( if si > 0 { 0 } else {1 << k});
+            }
+        };
+
+        return bytes_vec;
+    }
+
+    pub fn overlap(&self, other: &IsingState) -> i64 {
+        let mut q : i64 = 0;
+        for (&si, &sj) in self.arr.iter().zip_eq(other.arr.iter()){
+            q +=  (si * sj) as i64;
+        }
+        return q;
     }
 }
 
@@ -191,10 +216,7 @@ impl BqmIsingInstance{
 impl Instance<usize, IsingState> for BqmIsingInstance {
     type Energy = f64;
 
-    fn energy(&self, state: &mut IsingState) -> f64 {
-        if state.energy_init{
-            return state.energy;
-        }
+    fn energy_ref(&self, state: & IsingState) -> f64 {
         let mut total_energy = self.offset;
         for (i, row)in self.coupling.outer_iterator().enumerate(){
             unsafe {
@@ -208,6 +230,14 @@ impl Instance<usize, IsingState> for BqmIsingInstance {
                 total_energy += h * si;
             }
         }
+
+        return total_energy;
+    }
+    fn energy(&self, state: &mut IsingState) -> f64 {
+        if state.energy_init{
+            return state.energy;
+        }
+        let total_energy = self.energy_ref(state);
         state.energy = total_energy;
         state.energy_init = true;
         return total_energy;
@@ -331,6 +361,81 @@ impl PtIcmMinResults{
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PtIcmThermalSamples{
+    pub samples: Vec<Vec<Vec<u64>>>,
+    pub instance_size: u64,
+    pub beta_arr: Vec<f32>,
+    pub e: Vec<Vec<f32>>,
+    pub e2: Vec<Vec<f32>>,
+    pub e4: Vec<Vec<f32>>,
+    pub q: Vec<Vec<i32>>,
+    pub q2: Vec<Vec<i32>>,
+    pub q4: Vec<Vec<i32>>
+}
+
+impl PtIcmThermalSamples{
+    fn new(beta_arr: &Vec<f64>, instance_size: u64, capacity: usize, samp_capacity: usize) -> Self{
+        let num_betas = beta_arr.len();
+        let beta_arr = beta_arr.iter().map(|&x|x as f32).collect();
+        let mut me = Self{
+            samples: Vec::with_capacity(num_betas),
+            beta_arr,
+            instance_size,
+            e: Vec::with_capacity(num_betas),
+            e2: Vec::with_capacity(num_betas),
+            e4: Vec::with_capacity(num_betas),
+            q: Vec::with_capacity(num_betas),
+            q2: Vec::with_capacity(num_betas),
+            q4: Vec::with_capacity(num_betas)
+        };
+        for _ in 0..num_betas {
+            me.samples.push(Vec::with_capacity(samp_capacity));
+            me.e.push(Vec::with_capacity(2*capacity));
+            me.e2.push(Vec::with_capacity(2*capacity));
+            me.e4.push(Vec::with_capacity(2*capacity));
+            me.q.push(Vec::with_capacity(capacity));
+            me.q2.push(Vec::with_capacity(capacity));
+            me.q4.push(Vec::with_capacity(capacity))
+        }
+        return me;
+    }
+
+    fn measure(&mut self, pt_state: & Vec<pt::PTState<IsingState>>, instance:& BqmIsingInstance) {
+        let num_chains = pt_state.len();
+        let num_betas = pt_state[0].states.len();
+        for i in 0..num_betas{
+            for j in 0..num_chains{
+                let isn = &pt_state[j].states[i];
+                let e = instance.energy_ref(isn);
+                let e2 = e*e;
+                self.e[i].push(e as f32);
+                self.e2[i].push(e2 as f32);
+                self.e4[i].push((e2*e2) as f32);
+            }
+            for j in 0..(num_chains/2) {
+                let isn1 = &pt_state[2*j].states[i];
+                let isn2 = &pt_state[2*j+1].states[i];
+                let q = isn1.overlap(isn2);
+                let q2 = q*q;
+                self.q[i].push(q as i32);
+                self.q2[i].push(q2 as i32);
+                self.q4[i].push((q2*q2) as i32);
+            }
+        }
+    }
+    fn sample_states(&mut self, pt_state: & Vec<pt::PTState<IsingState>>) {
+        let num_chains = pt_state.len();
+        let num_betas = pt_state[0].states.len();
+        for i in 0..num_betas{
+            for j in 0..num_chains{
+                let isn = &pt_state[j].states[i];
+                self.samples[i].push(isn.as_bytes());
+            }
+        }
+    }
+}
+
 #[derive(Copy, Clone, Serialize, Deserialize)]
 pub struct BetaSpec{
     pub beta_min: f64,
@@ -368,7 +473,9 @@ pub struct PtIcmParams {
     pub lo_beta: f64,
     pub icm: bool,
     pub num_replica_chains: u32,
-    pub threads: u32
+    pub threads: u32,
+    pub sample: Option<u32>,
+    pub sample_states: Option<u32>
 }
 
 impl Default for PtIcmParams{
@@ -380,7 +487,9 @@ impl Default for PtIcmParams{
             lo_beta: 1.0,
             icm: true,
             num_replica_chains: 2,
-            threads: 1
+            threads: 1,
+            sample: Some(32),
+            sample_states: Some(64)
         }
     }
 }
@@ -391,7 +500,7 @@ impl PtIcmParams {
     //     return Ok(())
     // }
 }
-struct PtIcmRunner<'a>{
+pub struct PtIcmRunner<'a>{
     params: &'a PtIcmParams,
     instance: &'a BqmIsingInstance,
     g: Csr<(), ()>,
@@ -437,7 +546,7 @@ impl<'a> PtIcmRunner<'a>{
     }
 
 
-    pub fn run_parallel(&self) -> (PtIcmMinResults, Vec<PTState<IsingState>>){
+    pub fn run_parallel(&self) -> (PtIcmMinResults, PtIcmThermalSamples, Vec<PTState<IsingState>>){
         let m = self.params.num_replica_chains;
         let num_betas = self.beta_vec.len();
         // seed and create random number generator
@@ -458,13 +567,13 @@ impl<'a> PtIcmRunner<'a>{
             rng_vec.push(rng_chain);
         };
 
-        let mut pt_results = self.parallel_pt_loop(&mut pt_state, &mut rng_vec);
+        let (mut pt_results, pt_samps) = self.parallel_pt_loop(&mut pt_state, &mut rng_vec);
         self.count_acc(&pt_state, &mut pt_results);
-        return (pt_results, pt_state);
+        return (pt_results, pt_samps, pt_state);
     }
 
 
-    pub fn run(&self, initial_state: Option<Vec<PTState<IsingState>>>) -> (PtIcmMinResults, Vec<PTState<IsingState>>){
+    pub fn run(&self, initial_state: Option<Vec<PTState<IsingState>>>) -> (PtIcmMinResults, PtIcmThermalSamples, Vec<PTState<IsingState>>){
         // seed and create random number generator
         let mut rngt = thread_rng();
         let mut seed_seq = [0u8; 32];
@@ -475,26 +584,38 @@ impl<'a> PtIcmRunner<'a>{
             None => self.generate_init_state(&mut rng),
             Some(st) => { st }
         };
-        let mut pt_results = self.pt_loop(&mut pt_state, &mut rng);
+        let (mut pt_results, pt_samps) = self.pt_loop(&mut pt_state, &mut rng);
         self.count_acc(&pt_state, &mut pt_results);
         //pt_results.final_state = pt_state;
-        return (pt_results, pt_state);
+        return (pt_results, pt_samps, pt_state);
     }
 
     fn parallel_pt_loop<Rn: Rng+Send>(
         &self, pt_state: &mut Vec<pt::PTState<IsingState>>,
         rng_vec: &mut Vec<Vec<Rn>>
-    ) -> PtIcmMinResults
+    ) -> (PtIcmMinResults, PtIcmThermalSamples)
     {
         // Initialize samplers
         let n = self.instance.size();
         let num_betas = self.beta_vec.len();
         let num_sweeps = self.params.num_sweeps;
+        let num_chains = self.params.num_replica_chains;
+        let samp_capacity = if let &Some(nsamp) = &self.params.sample{
+            num_chains * (num_sweeps - self.meas_init) / nsamp
+        } else {
+            0
+        } as usize;
+        let state_samp_capacity = if let &Some(nsamp) = &self.params.sample_states{
+            num_chains * (num_sweeps - self.meas_init) / nsamp
+        } else {
+            0
+        } as usize;
         let samplers: Vec<_> = self.beta_vec.iter()
             .map(|&b | MetropolisSampler::new_uniform(self.instance,b, n))
             .collect();
         let pt_sampler = ppt::parallel_tempering_sampler(samplers);
         let mut pt_results = PtIcmMinResults::new(self.params.clone(),num_betas as u32);
+        let mut pt_samps = PtIcmThermalSamples::new(&self.beta_vec, n as u64,samp_capacity, state_samp_capacity);
         let mut pt_chains_sampler = pens::ThreadedEnsembleSampler::new(pt_sampler);
         let mut minimum_e = None;
         info!("-- PT-ICM begin");
@@ -502,30 +623,44 @@ impl<'a> PtIcmRunner<'a>{
         for i in 0..num_sweeps{
             self.apply_icm(pt_state, &mut rng_vec[0][0]);
             pt_chains_sampler.sweep(pt_state, rng_vec);
-            self.apply_measurements(i, pt_state, &mut minimum_e, &mut pt_results);
+            self.apply_measurements(i, pt_state, &mut minimum_e, &mut pt_results, &mut pt_samps);
         }
         let end = start.elapsed();
         info!("-- PT-ICM Finished");
         info!("Duration: {:5.4} s", end.as_secs_f64());
         pt_results.timing = end.as_micros() as f64;
 
-        return pt_results;
+        return (pt_results, pt_samps);
     }
 
     fn pt_loop<Rn: Rng>(
         &self, pt_state: &mut Vec<pt::PTState<IsingState>>,
         rng: &mut Rn
-    ) -> PtIcmMinResults
+    ) -> (PtIcmMinResults, PtIcmThermalSamples)
     {
         // Initialize samplers
         let n = self.instance.size();
         let num_betas = self.beta_vec.len();
         let num_sweeps = self.params.num_sweeps;
+        let num_chains = self.params.num_replica_chains;
+        let samp_capacity = if let &Some(nsamp) = &self.params.sample{
+            num_chains * (num_sweeps - self.meas_init) / nsamp
+        } else {
+            0
+        } as usize;
+        let state_samp_capacity = if let &Some(nsamp) = &self.params.sample_states{
+           num_chains * (num_sweeps - self.meas_init) / nsamp
+        } else {
+            0
+        } as usize;
+
         let samplers: Vec<_> = self.beta_vec.iter()
             .map(|&b | MetropolisSampler::new_uniform(self.instance,b, n))
             .collect();
         let pt_sampler = pt::parallel_tempering_sampler(samplers);
         let mut pt_results = PtIcmMinResults::new(self.params.clone(),num_betas as u32);
+
+        let mut pt_samps = PtIcmThermalSamples::new(&self.beta_vec, n as u64, samp_capacity, state_samp_capacity);
         let mut pt_chains_sampler = ens::EnsembleSampler::new(pt_sampler);
         let mut minimum_e = None;
         info!("-- PT-ICM begin");
@@ -533,14 +668,14 @@ impl<'a> PtIcmRunner<'a>{
         for i in 0..num_sweeps{
             self.apply_icm(pt_state, rng);
             pt_chains_sampler.sweep(pt_state, rng);
-            self.apply_measurements(i, pt_state, &mut minimum_e, &mut pt_results);
+            self.apply_measurements(i, pt_state, &mut minimum_e, &mut pt_results, &mut pt_samps);
         }
         let end = start.elapsed();
         info!("-- PT-ICM Finished");
         info!("Duration: {:5.4} s", end.as_secs_f64());
         pt_results.timing = end.as_micros() as f64;
 
-        return pt_results;
+        return (pt_results, pt_samps);
     }
 
     fn generate_init_state<Rn: Rng+?Sized>(&self, rng: &mut Rn) -> Vec<pt::PTState<IsingState>>{
@@ -580,10 +715,23 @@ impl<'a> PtIcmRunner<'a>{
     }
 
     fn apply_measurements(&self, i: u32, pt_state: &mut Vec<pt::PTState<IsingState>>,
-                          minimum_e: &mut Option<f64>, pt_results: &mut PtIcmMinResults)
+                          minimum_e: &mut Option<f64>, pt_results: &mut PtIcmMinResults,
+                          pt_samples: &mut PtIcmThermalSamples)
     {
-        // Measure statistics/lowest energy state so far
+
         if i >= self.meas_init {
+            let stp = i-self.meas_init;
+            if let Some(samp_steps) = self.params.sample{
+                if stp % samp_steps == 0 {
+                    pt_samples.measure(pt_state, &self.instance);
+                }
+            }
+            if let Some(state_samp_steps) = self.params.sample{
+                if stp % state_samp_steps == 0 {
+                    pt_samples.sample_states(pt_state);
+                }
+            }
+            // Measure statistics/lowest energy state so far
             let mut min_energies = Vec::with_capacity(pt_state.len());
             for pts in pt_state.iter_mut() {
                 let energies : Vec<f64> = pts.states_mut().iter_mut()
@@ -669,7 +817,7 @@ pub fn pt_optimize_beta(
         let pticm_vec: Vec<PtIcmRunner> = instances.iter()
             .map(|i| PtIcmRunner::new(i, &params)).collect();
         let results: Vec<Vec<PTState<IsingState>>> = pticm_vec.par_iter().zip_eq(init_states.par_iter())
-            .map(|(p, s)| p.run(s.clone()).1).collect();
+            .map(|(p, s)| p.run(s.clone()).2).collect();
         // Gather the diffusion histograms for each temperature summed over all replica chains
         // Also evaluate the round trip times
         let mut dif_probs_vec : Vec<Array1<f64>> = Vec::with_capacity(num_instances);
