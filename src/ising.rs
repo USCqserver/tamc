@@ -722,12 +722,12 @@ impl<'a> PtIcmRunner<'a>{
         if i >= self.meas_init {
             let stp = i-self.meas_init;
             if let Some(samp_steps) = self.params.sample{
-                if stp % samp_steps == 0 {
+                if stp % samp_steps == 0 || i == self.params.num_sweeps-1{
                     pt_samples.measure(pt_state, &self.instance);
                 }
             }
-            if let Some(state_samp_steps) = self.params.sample{
-                if stp % state_samp_steps == 0 {
+            if let Some(state_samp_steps) = self.params.sample_states{
+                if stp % state_samp_steps == 0 || i == self.params.num_sweeps-1{
                     pt_samples.sample_states(pt_state);
                 }
             }
