@@ -367,11 +367,7 @@ pub struct PtIcmThermalSamples{
     pub instance_size: u64,
     pub beta_arr: Vec<f32>,
     pub e: Vec<Vec<f32>>,
-    pub e2: Vec<Vec<f32>>,
-    pub e4: Vec<Vec<f32>>,
-    pub q: Vec<Vec<i32>>,
-    pub q2: Vec<Vec<i32>>,
-    pub q4: Vec<Vec<i32>>
+    pub q: Vec<Vec<i32>>
 }
 
 impl PtIcmThermalSamples{
@@ -383,20 +379,16 @@ impl PtIcmThermalSamples{
             beta_arr,
             instance_size,
             e: Vec::with_capacity(num_betas),
-            e2: Vec::with_capacity(num_betas),
-            e4: Vec::with_capacity(num_betas),
             q: Vec::with_capacity(num_betas),
-            q2: Vec::with_capacity(num_betas),
-            q4: Vec::with_capacity(num_betas)
         };
         for _ in 0..num_betas {
             me.samples.push(Vec::with_capacity(samp_capacity));
             me.e.push(Vec::with_capacity(2*capacity));
-            me.e2.push(Vec::with_capacity(2*capacity));
-            me.e4.push(Vec::with_capacity(2*capacity));
+            //me.e2.push(Vec::with_capacity(2*capacity));
+            //me.e4.push(Vec::with_capacity(2*capacity));
             me.q.push(Vec::with_capacity(capacity));
-            me.q2.push(Vec::with_capacity(capacity));
-            me.q4.push(Vec::with_capacity(capacity))
+            //me.q2.push(Vec::with_capacity(capacity));
+            //me.q4.push(Vec::with_capacity(capacity))
         }
         return me;
     }
@@ -408,19 +400,13 @@ impl PtIcmThermalSamples{
             for j in 0..num_chains{
                 let isn = &pt_state[j].states[i];
                 let e = instance.energy_ref(isn);
-                let e2 = e*e;
                 self.e[i].push(e as f32);
-                self.e2[i].push(e2 as f32);
-                self.e4[i].push((e2*e2) as f32);
             }
             for j in 0..(num_chains/2) {
                 let isn1 = &pt_state[2*j].states[i];
                 let isn2 = &pt_state[2*j+1].states[i];
                 let q = isn1.overlap(isn2);
-                let q2 = q*q;
                 self.q[i].push(q as i32);
-                self.q2[i].push(q2 as i32);
-                self.q4[i].push((q2*q2) as i32);
             }
         }
     }
