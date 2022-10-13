@@ -88,13 +88,13 @@ impl IsingState{
         return s;
     }
 
-    pub fn as_bytes(&self) -> Vec<u64>{
+    pub fn as_bytes(&self) -> Vec<u8>{
         let n = self.arr.len();
-        let num_bytes = n/64 + (if n%64 == 0{ 0 } else { 1 });
-        let mut bytes_vec: Vec<u64> =(&[0]).repeat(num_bytes);
+        let num_bytes = n/8 + (if n%8 == 0{ 0 } else { 1 });
+        let mut bytes_vec: Vec<u8> =(&[0]).repeat(num_bytes);
         for (i, &si) in self.arr.iter().enumerate(){
-            let bi = i / 64;
-            let k = i % 64;
+            let bi = i / 8;
+            let k = i % 8;
             unsafe {
                 let b = bytes_vec.get_unchecked_mut(bi);
                 *b |= ( if si > 0 { 0 } else {1 << k});
@@ -363,15 +363,17 @@ impl PtIcmMinResults{
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PtIcmThermalSamples{
-    pub samples: Vec<Vec<Vec<u64>>>,
+    pub samples: Vec<Vec<Vec<u8>>>,
     pub instance_size: u64,
     pub beta_arr: Vec<f32>,
     pub e: Vec<Vec<f32>>,
-    pub q: Vec<Vec<i32>>
+    pub q: Vec<Vec<i32>>,
+    compression_level: u8
 }
 
 impl PtIcmThermalSamples{
-    fn new(beta_arr: &Vec<f64>, instance_size: u64, capacity: usize, samp_capacity: usize) -> Self{
+    fn new(beta_arr: &Vec<f64>, instance_size: u64, capacity: usize, samp_capacity: usize,
+           compression_level: u8) -> Self{
         let num_betas = beta_arr.len();
         let beta_arr = beta_arr.iter().map(|&x|x as f32).collect();
         let mut me = Self{
@@ -380,15 +382,27 @@ impl PtIcmThermalSamples{
             instance_size,
             e: Vec::with_capacity(num_betas),
             q: Vec::with_capacity(num_betas),
+            compression_level
         };
         for _ in 0..num_betas {
-            me.samples.push(Vec::with_capacity(samp_capacity));
+
             me.e.push(Vec::with_capacity(2*capacity));
             //me.e2.push(Vec::with_capacity(2*capacity));
             //me.e4.push(Vec::with_capacity(2*capacity));
             me.q.push(Vec::with_capacity(capacity));
             //me.q2.push(Vec::with_capacity(capacity));
             //me.q4.push(Vec::with_capacity(capacity))
+        }
+        if compression_level == 0{ // no compression: save all states at all temperatures
+            for _ in 0..num_betas {
+                me.samples.push(Vec::with_capacity(samp_capacity));
+            }
+        } else if compression_level == 1{ // save only the lower half of the temperatures
+            for _ in 0..(num_betas/2) {
+                me.samples.push(Vec::with_capacity(samp_capacity));
+            }
+        } else { //save only the lowest temperature samples
+            me.samples.push(Vec::with_capacity(samp_capacity));
         }
         return me;
     }
@@ -413,10 +427,25 @@ impl PtIcmThermalSamples{
     fn sample_states(&mut self, pt_state: & Vec<pt::PTState<IsingState>>) {
         let num_chains = pt_state.len();
         let num_betas = pt_state[0].states.len();
-        for i in 0..num_betas{
-            for j in 0..num_chains{
-                let isn = &pt_state[j].states[i];
-                self.samples[i].push(isn.as_bytes());
+        if self.compression_level == 0 {
+            for i in 0..num_betas {
+                for j in 0..num_chains {
+                    let isn = &pt_state[j].states[i];
+                    self.samples[i].push(isn.as_bytes());
+                }
+            }
+        } else if self.compression_level == 1 {
+            for i in 0..(num_betas/2){
+                let isamp = num_betas - i - 1;
+                for j in 0..num_chains {
+                    let isn = &pt_state[j].states[isamp];
+                    self.samples[i].push(isn.as_bytes());
+                }
+            }
+        } else {
+            for j in 0..num_chains {
+                let isn = &pt_state[j].states[num_betas - 1];
+                self.samples[0].push(isn.as_bytes());
             }
         }
     }
@@ -461,7 +490,8 @@ pub struct PtIcmParams {
     pub num_replica_chains: u32,
     pub threads: u32,
     pub sample: Option<u32>,
-    pub sample_states: Option<u32>
+    pub sample_states: Option<u32>,
+    pub sample_limiting: u8
 }
 
 impl Default for PtIcmParams{
@@ -475,7 +505,8 @@ impl Default for PtIcmParams{
             num_replica_chains: 2,
             threads: 1,
             sample: Some(32),
-            sample_states: Some(64)
+            sample_states: Some(64),
+            sample_limiting: 0
         }
     }
 }
@@ -601,7 +632,7 @@ impl<'a> PtIcmRunner<'a>{
             .collect();
         let pt_sampler = ppt::parallel_tempering_sampler(samplers);
         let mut pt_results = PtIcmMinResults::new(self.params.clone(),num_betas as u32);
-        let mut pt_samps = PtIcmThermalSamples::new(&self.beta_vec, n as u64,samp_capacity, state_samp_capacity);
+        let mut pt_samps = PtIcmThermalSamples::new(&self.beta_vec, n as u64,samp_capacity, state_samp_capacity, self.params.sample_limiting);
         let mut pt_chains_sampler = pens::ThreadedEnsembleSampler::new(pt_sampler);
         let mut minimum_e = None;
         info!("-- PT-ICM begin");
@@ -646,7 +677,7 @@ impl<'a> PtIcmRunner<'a>{
         let pt_sampler = pt::parallel_tempering_sampler(samplers);
         let mut pt_results = PtIcmMinResults::new(self.params.clone(),num_betas as u32);
 
-        let mut pt_samps = PtIcmThermalSamples::new(&self.beta_vec, n as u64, samp_capacity, state_samp_capacity);
+        let mut pt_samps = PtIcmThermalSamples::new(&self.beta_vec, n as u64, samp_capacity, state_samp_capacity, self.params.sample_limiting);
         let mut pt_chains_sampler = ens::EnsembleSampler::new(pt_sampler);
         let mut minimum_e = None;
         info!("-- PT-ICM begin");
