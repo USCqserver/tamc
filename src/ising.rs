@@ -104,6 +104,22 @@ impl IsingState{
         return bytes_vec;
     }
 
+    pub fn as_u64_vec(&self) -> Vec<u64>{
+        let n = self.arr.len();
+        let num_bytes = n/64 + (if n%64 == 0{ 0 } else { 1 });
+        let mut bytes_vec: Vec<u64> =(&[0]).repeat(num_bytes);
+        for (i, &si) in self.arr.iter().enumerate(){
+            let bi = i / 64;
+            let k = i % 64;
+            unsafe {
+                let b = bytes_vec.get_unchecked_mut(bi);
+                *b |= ( if si > 0 { 0 } else {1 << k});
+            }
+        };
+
+        return bytes_vec;
+    }
+
     pub fn overlap(&self, other: &IsingState) -> i64 {
         let mut q : i64 = 0;
         for (&si, &sj) in self.arr.iter().zip_eq(other.arr.iter()){
@@ -339,14 +355,15 @@ pub struct PtIcmMinResults{
     pub timing: f64,
     pub gs_time_steps: Vec<u32>,
     pub gs_energies: Vec<f64>,
-    pub gs_states: Vec<Vec<Spin>>,
+    pub gs_states: Vec<Vec<u64>>,
     pub num_measurements: u32,
+    pub instance_size: u32,
     pub acceptance_counts: Vec<u32>,
     //pub final_state: Vec<PTState<IsingState>>
 }
 
 impl PtIcmMinResults{
-    fn new(params: PtIcmParams, num_betas: u32) -> Self{
+    fn new(params: PtIcmParams, num_betas: u32, instance_size: u32) -> Self{
         let acceptance_counts = Array1::zeros(num_betas as usize).into_raw_vec();
         return Self{
             params,
@@ -356,6 +373,7 @@ impl PtIcmMinResults{
             num_measurements: 0,
             acceptance_counts,
             timing: 0.0,
+            instance_size
             //final_state: Vec::new()
         };
     }
@@ -631,7 +649,7 @@ impl<'a> PtIcmRunner<'a>{
             .map(|&b | MetropolisSampler::new_uniform(self.instance,b, n))
             .collect();
         let pt_sampler = ppt::parallel_tempering_sampler(samplers);
-        let mut pt_results = PtIcmMinResults::new(self.params.clone(),num_betas as u32);
+        let mut pt_results = PtIcmMinResults::new(self.params.clone(),num_betas as u32, n as u32);
         let mut pt_samps = PtIcmThermalSamples::new(&self.beta_vec, n as u64,samp_capacity, state_samp_capacity, self.params.sample_limiting);
         let mut pt_chains_sampler = pens::ThreadedEnsembleSampler::new(pt_sampler);
         let mut minimum_e = None;
@@ -675,7 +693,7 @@ impl<'a> PtIcmRunner<'a>{
             .map(|&b | MetropolisSampler::new_uniform(self.instance,b, n))
             .collect();
         let pt_sampler = pt::parallel_tempering_sampler(samplers);
-        let mut pt_results = PtIcmMinResults::new(self.params.clone(),num_betas as u32);
+        let mut pt_results = PtIcmMinResults::new(self.params.clone(),num_betas as u32, n as u32);
 
         let mut pt_samps = PtIcmThermalSamples::new(&self.beta_vec, n as u64, samp_capacity, state_samp_capacity, self.params.sample_limiting);
         let mut pt_chains_sampler = ens::EnsembleSampler::new(pt_sampler);
@@ -767,7 +785,7 @@ impl<'a> PtIcmRunner<'a>{
 
             if minimum_e.map_or(true, |x| min_e < x) {
                 *minimum_e = Some(min_e);
-                pt_results.gs_states.push(min_state.arr.to_vec());
+                pt_results.gs_states.push(min_state.as_u64_vec());
                 pt_results.gs_energies.push(min_e);
                 pt_results.gs_time_steps.push(i)
             }
