@@ -381,12 +381,12 @@ impl PtIcmMinResults{
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PtIcmThermalSamples{
-    pub samples: Vec<Vec<Vec<u8>>>,
+    compression_level: u8,
     pub instance_size: u64,
     pub beta_arr: Vec<f32>,
+    pub samples: Vec<Vec<Vec<u8>>>,
     pub e: Vec<Vec<f32>>,
     pub q: Vec<Vec<i32>>,
-    compression_level: u8
 }
 
 impl PtIcmThermalSamples{

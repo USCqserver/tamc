@@ -86,7 +86,7 @@ pub struct Prog{
 pub fn run_program(prog: Prog) -> Result<(), Box<dyn Error>>{
     let method_file = prog.method_file;
     let instance_file = prog.instance_file;
-    let sample_output = prog.sample_output.unwrap_or("samples.pkl".to_string());
+    let sample_output = prog.sample_output.unwrap_or("samples.bin".to_string());
     let instance = ising::BqmIsingInstance::from_instance_file(&instance_file, prog.qubo);
     let yaml_str = std::fs::read_to_string(&method_file)
         .map_err(|e| PTError::IoError(e, method_file.to_string() ))?;
@@ -116,7 +116,7 @@ pub fn run_program(prog: Prog) -> Result<(), Box<dyn Error>>{
             {
                 let mut f = File::create(sample_output)
                     .expect("Failed to create sample output file");
-                serde_pickle::to_writer(&mut f, &samp_results, serde_pickle::SerOptions::default());
+                bincode::serialize_into(&mut f, &samp_results);
             }
         }
     };
