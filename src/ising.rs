@@ -509,7 +509,7 @@ pub struct PtIcmParams {
     pub threads: u32,
     pub sample: Option<u32>,
     pub sample_states: Option<u32>,
-    pub sample_limiting: u8
+    pub sample_limiting: Option<u8>
 }
 
 impl Default for PtIcmParams{
@@ -524,7 +524,7 @@ impl Default for PtIcmParams{
             threads: 1,
             sample: Some(32),
             sample_states: Some(64),
-            sample_limiting: 0
+            sample_limiting: Some(0)
         }
     }
 }
@@ -650,7 +650,8 @@ impl<'a> PtIcmRunner<'a>{
             .collect();
         let pt_sampler = ppt::parallel_tempering_sampler(samplers);
         let mut pt_results = PtIcmMinResults::new(self.params.clone(),num_betas as u32, n as u32);
-        let mut pt_samps = PtIcmThermalSamples::new(&self.beta_vec, n as u64,samp_capacity, state_samp_capacity, self.params.sample_limiting);
+        let mut pt_samps = PtIcmThermalSamples::new(&self.beta_vec, n as u64,samp_capacity,
+                                                    state_samp_capacity, self.params.sample_limiting.unwrap_or(0));
         let mut pt_chains_sampler = pens::ThreadedEnsembleSampler::new(pt_sampler);
         let mut minimum_e = None;
         info!("-- PT-ICM begin");
@@ -695,7 +696,8 @@ impl<'a> PtIcmRunner<'a>{
         let pt_sampler = pt::parallel_tempering_sampler(samplers);
         let mut pt_results = PtIcmMinResults::new(self.params.clone(),num_betas as u32, n as u32);
 
-        let mut pt_samps = PtIcmThermalSamples::new(&self.beta_vec, n as u64, samp_capacity, state_samp_capacity, self.params.sample_limiting);
+        let mut pt_samps = PtIcmThermalSamples::new(&self.beta_vec, n as u64, samp_capacity,
+                                                    state_samp_capacity, self.params.sample_limiting.unwrap_or(0));
         let mut pt_chains_sampler = ens::EnsembleSampler::new(pt_sampler);
         let mut minimum_e = None;
         info!("-- PT-ICM begin");
