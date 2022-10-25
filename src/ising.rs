@@ -38,7 +38,7 @@ pub type Spin=i8;
 #[derive(Debug, Clone, Serialize)]
 #[derive()]
 pub struct IsingState{
-    pub arr: Array1<Spin>,
+    pub arr: Vec<Spin>,
     #[serde(skip)]
     pub energy: f64,
     energy_init: bool
@@ -48,7 +48,7 @@ impl IsingState{
     /// Fast access and convert to f64 spin by simply checking the sign
     #[inline]
     pub unsafe fn uget_f64(&self, index: usize) -> f64{
-        let &si = self.arr.uget(index);
+        let &si = self.arr.get_unchecked(index);
         if si > 0{
             1.0
         } else {
@@ -58,12 +58,12 @@ impl IsingState{
     /// Fast access and convert to f64 spin by simply checking the sign
     #[inline]
     pub unsafe fn uget(&self, index: usize) -> i8{
-        return *self.arr.uget(index);
+        return *self.arr.get_unchecked(index);
     }
     /// Access and flip the sign of the spin
     #[inline]
     pub unsafe fn uset_neg(&mut self, index: usize){
-        *self.arr.uget_mut(index) *= -1;
+        *self.arr.get_unchecked_mut(index) *= -1;
     }
 
     pub fn mag(&self) -> i64{
@@ -128,11 +128,11 @@ impl IsingState{
 }
 
 pub fn rand_ising_state<I: Instance<usize, IsingState>, Rn: Rng+?Sized>(n: usize, instance: &I, rng: &mut Rn) -> IsingState{
-    let mut arr = Array1::uninit(n);
-    for s in arr.iter_mut(){
-        s.assign_elem( 2*rng.sample(Uniform::new_inclusive(0, 1)) - 1);
+    let mut arr = Vec::new();
+    arr.reserve(n);
+    for _ in 0..n{
+        arr.push( 2*rng.sample(Uniform::new_inclusive(0, 1)) - 1);
     }
-    let arr = unsafe { arr.assume_init() };
     let mut ising_state = IsingState{arr, energy: 0.0, energy_init: false};
     instance.energy(&mut ising_state);
     return ising_state;
@@ -154,7 +154,9 @@ impl IndexMut<usize> for IsingState{
 
 impl State<usize> for IsingState{
     fn accept_move(&mut self, mv: usize) {
-        self.arr[mv] *= -1;
+        unsafe{
+            self.uset_neg(mv);
+        }
     }
 }
 
@@ -166,8 +168,9 @@ impl State<usize> for IsingState{
 /// where $h_i$ are the biases and $J_{ij}$ are the couplings
 pub struct BqmIsingInstance{
     pub offset: f64,
-    pub bias: Array1<f64>,
+    pub bias: Vec<f64>,
     pub coupling: CsMat<f64>,
+    pub coupling_vecs: Vec<Vec<(usize, f64)>>,
     pub suscept_coefs: Vec<Array1<f64>>
 }
 impl BqmIsingInstance{
@@ -176,15 +179,20 @@ impl BqmIsingInstance{
         if n1 != n2{
             panic!("couplings matrix must be square, but has shape {}, {}",n1, n2);
         }
+        let mut coupling_vecs = Vec::new();
+        coupling_vecs.resize(n1, Vec::new());
         for (i, row)in coupling.outer_iterator().enumerate(){
             for (j, &K) in row.iter() {
                 if i == j{
                     panic!("Expected a zero-bias Csr instance");
                 }
+                coupling_vecs[i].push((j, K));
             }
         }
-        let bias = Array1::zeros(n1);
-        return Self{offset: 0.0, bias, coupling, suscept_coefs: Vec::new()};
+        let mut bias = Vec::new();
+        bias.resize(n1, 0.0);
+
+        return Self{offset: 0.0, bias, coupling, coupling_vecs, suscept_coefs: Vec::new()};
     }
     pub fn from_instance_file(file: &str, qubo: bool) -> Self{
         let adj_list = read_adjacency_list_from_file(file)
@@ -192,22 +200,30 @@ impl BqmIsingInstance{
         let n = adj_list.len();
         let mut offset = 0.0;
         let mut tri_mat = TriMat::new((n, n));
-        let mut bias = Array1::zeros(n);
+        let mut coupling_vecs = Vec::with_capacity(n);
+        coupling_vecs.resize(n, Vec::new());
+        let mut bias = Vec::new();
+        bias.resize(n, 0.0);
+
         for i in 0..n{
             let neighborhood = &adj_list[i];
+            coupling_vecs[i].reserve(neighborhood.len());
             for (&j, &K) in neighborhood.iter(){
                 if qubo{
                     if i != j {
                         offset += K / 8.0;
                         tri_mat.add_triplet(i, j, K/4.0);
+                        coupling_vecs[i].push((j, K/4.0));
                         bias[i] += K / 4.0;
                     } else {
                         offset += K / 2.0;
                         bias[i] += K / 2.0;
+                        coupling_vecs[i].push((j, K/2.0));
                     }
                 } else {
                     if i != j {
                         tri_mat.add_triplet(i, j, K);
+                        coupling_vecs[i].push((j, K));
                     } else {
                         bias[i] = K;
                     }
@@ -215,7 +231,7 @@ impl BqmIsingInstance{
             }
         }
         let coupling = tri_mat.to_csr();
-        return Self{offset, bias, coupling, suscept_coefs: Vec::new() };
+        return Self{offset, bias, coupling, coupling_vecs, suscept_coefs: Vec::new() };
     }
 
     pub fn to_csr_graph(&self) -> Csr<(), ()>{
@@ -236,14 +252,14 @@ impl Instance<usize, IsingState> for BqmIsingInstance {
 
     fn energy_ref(&self, state: & IsingState) -> f64 {
         let mut total_energy = self.offset;
-        for (i, row)in self.coupling.outer_iterator().enumerate(){
+        for (i, row)in self.coupling_vecs.iter().enumerate(){
             unsafe {
                 let mut h: f64 = 0.0;
-                let si = state.uget_f64(i);
-                h += *self.bias.uget(i) ;
-                for (j, &K) in row.iter() {
-                    let sj = state.uget_f64(j);
-                    h += (K * sj) / 2.0
+                let si = state.uget(i) as f64;
+                h += *self.bias.get_unchecked(i) ;
+                for &(j, K) in row.iter() {
+                    let sj = state.uget(j) as f64;
+                    h += (K * sj) / 2.0;
                 }
                 total_energy += h * si;
             }
@@ -267,9 +283,9 @@ impl Instance<usize, IsingState> for BqmIsingInstance {
     unsafe fn delta_energy(&self, state: &mut IsingState, mv: &usize) -> f64 {
         let mut delta_e = 0.0;
         let &i = mv;
-        delta_e += *self.bias.uget(i) as f64;
-        let row = self.coupling.outer_view(i).unwrap();
-        for (j, &K) in row.iter(){
+        delta_e += *self.bias.get_unchecked(i) as f64;
+        let row = self.coupling_vecs.get_unchecked(i);
+        for &(j, K) in row.iter(){
             delta_e  += K * (state.uget(j) as f64);
         }
         let si = state.uget(i) as f64;
@@ -294,26 +310,23 @@ fn houdayer_cluster_move<R: Rng+?Sized>(replica1: &mut IsingState, replica2: &mu
     if n  > u32::MAX as usize{
         panic!("houdayer_cluster_move: instance size must fit in u32")
     }
-    let overlap: Array1<i8> = &replica1.arr * &replica2.arr;
+    let s1 = ArrayView1::from(&replica1.arr);
+    let s2 = ArrayView1::from(&replica2.arr);
+    let overlap: Array1<i8> = &s1 * &s2;
+
     // Select a random spin with q=-1
-    // Rather than random sampling until we find q=-1, we manually apply the shuffling algorithm
-    // and terminate once the spin being swapped has q=-1
-    let mut idxs : Vec<usize> = (0..n).collect();
-    let mut init_spin = None;
-    idxs.shuffle(rng);
-    for i in (1..n).rev(){
-        let j = rng.gen_range(0..(i+1) as u32) as usize;
-        let k = idxs[j];
-        if overlap[k] < 0 {
-            init_spin = Some(k);
-            break;
+    let mut idxs: Vec<usize> = Vec::new();
+    idxs.reserve(n);
+    for (i, &qi) in overlap.iter().enumerate(){
+        if qi < 0 {
+            idxs.push(i);
         }
-        idxs.swap(i, j);
     }
+    let init_spin = idxs.choose(rng);
 
     let init_spin = match init_spin{
         None => return None, // No spin has q=-1
-        Some(k) => k as u32
+        Some(&k) => k as u32
     };
 
     let filtered_graph = NodeFiltered::from_fn(graph, |n|overlap[n as usize] < 0);
@@ -327,7 +340,7 @@ fn houdayer_cluster_move<R: Rng+?Sized>(replica1: &mut IsingState, replica2: &mu
     //println!("cluster size = {}", cluster_size);
     // Finally, swap all
     for i in nodes.ones(){
-        unsafe { std::mem::swap(replica1.arr.uget_mut(i),  replica2.arr.uget_mut(i)); }
+        unsafe { std::mem::swap(replica1.arr.get_unchecked_mut(i),  replica2.arr.get_unchecked_mut(i)); }
     }
     // Invalidate energy caches
     replica1.energy_init=false;
