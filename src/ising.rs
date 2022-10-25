@@ -41,8 +41,6 @@ pub struct IsingState{
     pub arr: Array1<Spin>,
     #[serde(skip)]
     pub energy: f64,
-    #[serde(skip)]
-    delta_e_cache: f64,
     energy_init: bool
 }
 
@@ -135,7 +133,7 @@ pub fn rand_ising_state<I: Instance<usize, IsingState>, Rn: Rng+?Sized>(n: usize
         s.assign_elem( 2*rng.sample(Uniform::new_inclusive(0, 1)) - 1);
     }
     let arr = unsafe { arr.assume_init() };
-    let mut ising_state = IsingState{arr, energy: 0.0, delta_e_cache: 0.0, energy_init: false};
+    let mut ising_state = IsingState{arr, energy: 0.0, energy_init: false};
     instance.energy(&mut ising_state);
     return ising_state;
 }
@@ -157,7 +155,6 @@ impl IndexMut<usize> for IsingState{
 impl State<usize> for IsingState{
     fn accept_move(&mut self, mv: usize) {
         self.arr[mv] *= -1;
-        self.energy += self.delta_e_cache;
     }
 }
 
@@ -168,9 +165,10 @@ impl State<usize> for IsingState{
 ///
 /// where $h_i$ are the biases and $J_{ij}$ are the couplings
 pub struct BqmIsingInstance{
-    offset: f64,
-    bias: Array1<f64>,
-    coupling: CsMat<f64>
+    pub offset: f64,
+    pub bias: Array1<f64>,
+    pub coupling: CsMat<f64>,
+    pub suscept_coefs: Vec<Array1<f64>>
 }
 impl BqmIsingInstance{
     pub fn new_zero_bias(coupling: CsMat<f64>) -> Self{
@@ -186,7 +184,7 @@ impl BqmIsingInstance{
             }
         }
         let bias = Array1::zeros(n1);
-        return Self{offset: 0.0, bias, coupling};
+        return Self{offset: 0.0, bias, coupling, suscept_coefs: Vec::new()};
     }
     pub fn from_instance_file(file: &str, qubo: bool) -> Self{
         let adj_list = read_adjacency_list_from_file(file)
@@ -217,7 +215,7 @@ impl BqmIsingInstance{
             }
         }
         let coupling = tri_mat.to_csr();
-        return Self{offset, bias, coupling };
+        return Self{offset, bias, coupling, suscept_coefs: Vec::new() };
     }
 
     pub fn to_csr_graph(&self) -> Csr<(), ()>{
@@ -228,6 +226,10 @@ impl BqmIsingInstance{
 
         return g;
     }
+
+    // pub fn suscept(&self, state: &IsingState, i: usize) -> f64{
+    //
+    // }
 }
 impl Instance<usize, IsingState> for BqmIsingInstance {
     type Energy = f64;
@@ -265,13 +267,14 @@ impl Instance<usize, IsingState> for BqmIsingInstance {
     unsafe fn delta_energy(&self, state: &mut IsingState, mv: &usize) -> f64 {
         let mut delta_e = 0.0;
         let &i = mv;
-        let si = state.uget_f64(i);
-        delta_e += -2.0 * si * self.bias.uget(i);
+        delta_e += *self.bias.uget(i) as f64;
         let row = self.coupling.outer_view(i).unwrap();
         for (j, &K) in row.iter(){
-            delta_e  += - 2.0 * K * si * state.uget_f64(j)
+            delta_e  += K * (state.uget(j) as f64);
         }
-        state.delta_e_cache = delta_e;
+        let si = state.uget(i) as f64;
+        delta_e *= -2.0 * si;
+
         return delta_e;
     }
 
@@ -386,7 +389,7 @@ pub struct PtIcmThermalSamples{
     pub beta_arr: Vec<f32>,
     pub samples: Vec<Vec<Vec<u8>>>,
     pub e: Vec<Vec<f32>>,
-    pub q: Vec<Vec<i32>>,
+    pub q: Vec<Vec<i32>>
 }
 
 impl PtIcmThermalSamples{
