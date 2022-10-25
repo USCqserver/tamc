@@ -92,6 +92,36 @@ pub fn read_adjacency_list<R: io::Read>(input: R) -> Result<Vec<BTreeMap<usize, 
     Ok(adj_list)
 }
 
+
+pub fn read_txt_vec<R: io::Read>(input: R) -> Result<Vec<f64>, io::Error>
+{
+    use std::cmp::max;
+    use std::error::Error;
+
+    pub fn parse_line(line: &str) -> Result<f64, nom::Err<nom::error::Error<&str>> >{
+        let mut parser = delimited(space0, parse_fixed, multispace0);
+        let (i, d) = parser(line)?;
+        return Ok(d);
+    }
+
+    let reader = BufReader::new(input);
+
+    let mut dvec : Vec<f64> = Vec::new();
+    for (_i, line) in reader.lines().enumerate(){
+        let line = match line{Ok(l) => l, Err(e) => return Err(e)};
+        match parse_line(&line){
+            Ok(d) => {
+                dvec.push(d);
+            }
+            Err(e) =>{
+                println!("Ignoring line {}: {}", _i, e)
+            }
+        }
+    };
+
+    Ok(dvec)
+}
+
 pub fn adj_list_to_graph(adj_list: &Vec<BTreeMap<usize, f64>>) -> Graph<f64, f64, Undirected>{
     use petgraph::prelude::NodeIndex as Nd;
     let n = adj_list.len();

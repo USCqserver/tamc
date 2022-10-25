@@ -1,5 +1,6 @@
 use std::cmp::min;
 use std::fmt::Formatter;
+use std::fs::File;
 use std::ops::{AddAssign, Index, IndexMut};
 use std::time;
 
@@ -28,7 +29,7 @@ use tamc_core::sa::geometric_beta_schedule;
 use tamc_core::traits::*;
 
 use crate::{Instance, State};
-use crate::util::read_adjacency_list_from_file;
+use crate::util::{read_adjacency_list_from_file, read_txt_vec};
 use tamc_core::pt::PTState;
 use crate::ising::BetaOptions::Arr;
 use tamc_core::util::monotonic_divisions;
@@ -171,8 +172,9 @@ pub struct BqmIsingInstance{
     pub bias: Vec<f64>,
     pub coupling: CsMat<f64>,
     pub coupling_vecs: Vec<Vec<(usize, f64)>>,
-    pub suscept_coefs: Vec<Array1<f64>>
+    pub suscept_coefs: Vec<Vec<f64>>
 }
+
 impl BqmIsingInstance{
     pub fn new_zero_bias(coupling: CsMat<f64>) -> Self{
         let (n1, n2) = coupling.shape();
@@ -233,6 +235,22 @@ impl BqmIsingInstance{
         let coupling = tri_mat.to_csr();
         return Self{offset, bias, coupling, coupling_vecs, suscept_coefs: Vec::new() };
     }
+    pub fn with_suscept(self, suscept_files: &Vec<String>) -> Self{
+        let mut me = self;
+        for file in suscept_files.iter(){
+            let f = File::open(file).expect("Unable to open susceptibility file");
+            let dvec = read_txt_vec(f)
+                .expect("Unable to read susceptibility coefficients from file");
+            let n1 = dvec.len();
+            let n2 = me.bias.len();
+            if n1 != n2{
+                println!("WARNING: Ignoring suscept file {} - Expected {} coefficients, but got {}",
+                         file, n2, n1)
+            }
+            me.suscept_coefs.push(dvec)
+        }
+        return me;
+    }
 
     pub fn to_csr_graph(&self) -> Csr<(), ()>{
         // Construct csr graph
@@ -243,9 +261,13 @@ impl BqmIsingInstance{
         return g;
     }
 
-    // pub fn suscept(&self, state: &IsingState, i: usize) -> f64{
-    //
-    // }
+    pub fn suscept(&self, overlap: &[Spin], i: usize) -> f64{
+        let mut chi = 0.0;
+        for (&w, &si) in self.suscept_coefs[i].iter().zip_eq(overlap.iter()){
+            chi += w * (si as f64);
+        }
+        return chi;
+    }
 }
 impl Instance<usize, IsingState> for BqmIsingInstance {
     type Energy = f64;
@@ -402,11 +424,13 @@ pub struct PtIcmThermalSamples{
     pub beta_arr: Vec<f32>,
     pub samples: Vec<Vec<Vec<u8>>>,
     pub e: Vec<Vec<f32>>,
-    pub q: Vec<Vec<i32>>
+    pub q: Vec<Vec<i32>>,
+    pub suscept: Vec<Vec<Vec<f32>>>
 }
 
 impl PtIcmThermalSamples{
     fn new(beta_arr: &Vec<f64>, instance_size: u64, capacity: usize, samp_capacity: usize,
+           nchi: u32,
            compression_level: u8) -> Self{
         let num_betas = beta_arr.len();
         let beta_arr = beta_arr.iter().map(|&x|x as f32).collect();
@@ -416,16 +440,19 @@ impl PtIcmThermalSamples{
             instance_size,
             e: Vec::with_capacity(num_betas),
             q: Vec::with_capacity(num_betas),
+            suscept: Vec::with_capacity(num_betas),
             compression_level
         };
         for _ in 0..num_betas {
-
             me.e.push(Vec::with_capacity(2*capacity));
-            //me.e2.push(Vec::with_capacity(2*capacity));
-            //me.e4.push(Vec::with_capacity(2*capacity));
             me.q.push(Vec::with_capacity(capacity));
-            //me.q2.push(Vec::with_capacity(capacity));
-            //me.q4.push(Vec::with_capacity(capacity))
+            me.suscept.push(Vec::new());
+        }
+        for i in 0..num_betas{
+            me.suscept[i].resize(nchi as usize, Vec::new());
+            for j in 0..nchi{
+                me.suscept[i][j as usize].reserve(capacity);
+            }
         }
         if compression_level == 0{ // no compression: save all states at all temperatures
             for _ in 0..num_betas {
@@ -444,6 +471,13 @@ impl PtIcmThermalSamples{
     fn measure(&mut self, pt_state: & Vec<pt::PTState<IsingState>>, instance:& BqmIsingInstance) {
         let num_chains = pt_state.len();
         let num_betas = pt_state[0].states.len();
+        let n = pt_state[0].states[0].arr.len();
+        let nchi = instance.suscept_coefs.len();
+        let mut overlap_vec : Vec<i8> = Vec::new();
+        if nchi > 0 {
+            overlap_vec.resize(n, 0);
+        }
+
         for i in 0..num_betas{
             for j in 0..num_chains{
                 let isn = &pt_state[j].states[i];
@@ -453,6 +487,17 @@ impl PtIcmThermalSamples{
             for j in 0..(num_chains/2) {
                 let isn1 = &pt_state[2*j].states[i];
                 let isn2 = &pt_state[2*j+1].states[i];
+                if nchi > 0{
+                    for (qi,(&s1, &s2)) in overlap_vec.iter_mut().zip_eq(
+                        isn1.arr.iter().zip_eq(isn2.arr.iter())){
+                        *qi = s1 * s2;
+                    }
+                    for k in 0..nchi{
+                        let chi = instance.suscept(&overlap_vec, k);
+                        self.suscept[i][k].push(chi as f32);
+                    }
+                }
+
                 let q = isn1.overlap(isn2);
                 self.q[i].push(q as i32);
             }
@@ -667,7 +712,8 @@ impl<'a> PtIcmRunner<'a>{
         let pt_sampler = ppt::parallel_tempering_sampler(samplers);
         let mut pt_results = PtIcmMinResults::new(self.params.clone(),num_betas as u32, n as u32);
         let mut pt_samps = PtIcmThermalSamples::new(&self.beta_vec, n as u64,samp_capacity,
-                                                    state_samp_capacity, self.params.sample_limiting.unwrap_or(0));
+                                                    state_samp_capacity, self.instance.suscept_coefs.len() as u32,
+                                                    self.params.sample_limiting.unwrap_or(0));
         let mut pt_chains_sampler = pens::ThreadedEnsembleSampler::new(pt_sampler);
         let mut minimum_e = None;
         info!("-- PT-ICM begin");
@@ -713,7 +759,8 @@ impl<'a> PtIcmRunner<'a>{
         let mut pt_results = PtIcmMinResults::new(self.params.clone(),num_betas as u32, n as u32);
 
         let mut pt_samps = PtIcmThermalSamples::new(&self.beta_vec, n as u64, samp_capacity,
-                                                    state_samp_capacity, self.params.sample_limiting.unwrap_or(0));
+                                                    state_samp_capacity, self.instance.suscept_coefs.len() as u32,
+                                                    self.params.sample_limiting.unwrap_or(0));
         let mut pt_chains_sampler = ens::EnsembleSampler::new(pt_sampler);
         let mut minimum_e = None;
         info!("-- PT-ICM begin");

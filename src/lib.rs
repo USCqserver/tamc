@@ -21,6 +21,7 @@ use rand::distributions::{Distribution, Standard};
 use rand::distributions::uniform::{SampleUniform, Uniform};
 use std::marker::PhantomData;
 use std::error::Error;
+use std::ffi::OsStr;
 pub use tamc_core::metropolis;
 pub use tamc_core::traits::*;
 use serde::{Serialize, Deserialize};
@@ -31,6 +32,7 @@ pub mod percolation;
 use std::fs::File;
 use crate::ising::PtIcmParams;
 use std::fmt;
+use std::path::Path;
 
 #[derive(Serialize, Deserialize)]
 pub struct PTOptions{
@@ -78,6 +80,8 @@ pub struct Prog{
     pub instance_file: String,
     pub output_file: String,
     #[structopt(long)]
+    pub suscepts: Vec<String>,
+    #[structopt(long)]
     pub sample_output: Option<String>,
     #[structopt(long)]
     pub qubo: bool
@@ -87,7 +91,10 @@ pub fn run_program(prog: Prog) -> Result<(), Box<dyn Error>>{
     let method_file = prog.method_file;
     let instance_file = prog.instance_file;
     let sample_output = prog.sample_output.unwrap_or("samples.bin".to_string());
-    let instance = ising::BqmIsingInstance::from_instance_file(&instance_file, prog.qubo);
+    let mut instance = ising::BqmIsingInstance::from_instance_file(&instance_file, prog.qubo);
+    if prog.suscepts.len() > 0{
+        instance = instance.with_suscept(&prog.suscepts);
+    }
     let yaml_str = std::fs::read_to_string(&method_file)
         .map_err(|e| PTError::IoError(e, method_file.to_string() ))?;
     let opts: Method = serde_yaml::from_str(&yaml_str)
@@ -114,9 +121,14 @@ pub fn run_program(prog: Prog) -> Result<(), Box<dyn Error>>{
                     .expect("Failed to write to yaml file.")
             }
             {
-                let mut f = File::create(sample_output)
+                let mut f = File::create(&sample_output)
                     .expect("Failed to create sample output file");
-                bincode::serialize_into(&mut f, &samp_results);
+                let ext = Path::new(&sample_output).extension().and_then(OsStr::to_str);
+                if ext == Some("pkl"){
+                    serde_pickle::to_writer(&mut f, &samp_results, serde_pickle::SerOptions::default());
+                } else {
+                    bincode::serialize_into(&mut f, &samp_results).expect("Failed to serialize");
+                }
             }
         }
     };
