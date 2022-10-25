@@ -12,8 +12,8 @@ use rand::distributions::uniform::{SampleUniform, Uniform};
 #[derive(Clone)]
 pub struct MetropolisSampler<'a, R, N, St: State<N>, I: Instance<N, St>, D: Distribution<N>>{
     pub beta: R,
-    rand_distr: D,
-    instance: &'a I,
+    pub rand_distr: D,
+    pub instance: &'a I,
     _phantom: PhantomData<(St, N)>
 }
 
@@ -40,17 +40,20 @@ MetropolisSampler<'a, R, N, St, I, D>
             Standard: Distribution<R>,
             R: Real
 {
-    fn advance_impl<Rn: Rng+?Sized>(&self, mv: N, state: &mut St, rng: &mut Rn){
+    pub fn advance_impl<Rn: Rng+?Sized>(&self, mv: N, state: &mut St, rng: &mut Rn) -> Option<R>{
         let delta_e = unsafe { self.instance.delta_energy( state, &mv) };
         if delta_e < <I::Energy as Zero>::zero(){
             state.accept_move(mv);
+            return Some(delta_e);
         } else {
             let p = Real::exp(-self.beta * delta_e);
             let x: I::Energy = rng.sample(Standard);
             if x < p{
-                state.accept_move(mv)
+                state.accept_move(mv);
+                return Some(delta_e);
             }
         }
+        return None;
     }
 }
 

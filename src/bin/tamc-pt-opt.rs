@@ -24,7 +24,7 @@ fn main() {
     let method_file = prog.params;
     let instance_files = &prog.instances;
     let instance_vec : Vec<BqmIsingInstance> = instance_files.iter()
-        .map(|s| BqmIsingInstance::from_instance_file(&s)).collect();
+        .map(|s| BqmIsingInstance::from_instance_file(&s, false)).collect();
     let yaml_str = std::fs::read_to_string(method_file).unwrap();
     let opts: Method= serde_yaml::from_str(&yaml_str).unwrap();
     match opts{

@@ -8,16 +8,16 @@ use fixedbitset::FixedBitSet;
 use log::{info, debug, warn};
 use ndarray::AssignElem;
 use ndarray::prelude::*;
-use num_traits::Num;
+use num_traits::{FromPrimitive, Num, ToPrimitive};
 use num_traits::NumAssignOps;
 use num_traits::real::Real;
 use petgraph::csr::Csr;
-use rand::distributions::Uniform;
+use rand::distributions::{Standard, Uniform};
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use sprs::{CsMat, TriMat};
+use sprs::{CsMat, DenseVector, TriMat};
 use itertools::Itertools;
 
 use tamc_core::ensembles as ens;
@@ -41,15 +41,15 @@ pub type Spin=i8;
 pub struct IsingState{
     pub arr: Vec<Spin>,
     #[serde(skip)]
-    pub energy: f64,
+    pub energy: f32,
     energy_init: bool
 }
 
 impl IsingState{
     /// Fast access and convert to f64 spin by simply checking the sign
     #[inline]
-    pub unsafe fn uget_f64(&self, index: usize) -> f64{
-        let &si = self.arr.get_unchecked(index);
+    pub unsafe fn uget_f64(&self, index: u32) -> f64{
+        let &si = self.arr.get_unchecked(index as usize);
         if si > 0{
             1.0
         } else {
@@ -58,13 +58,13 @@ impl IsingState{
     }
     /// Fast access and convert to f64 spin by simply checking the sign
     #[inline]
-    pub unsafe fn uget(&self, index: usize) -> i8{
-        return *self.arr.get_unchecked(index);
+    pub unsafe fn uget(&self, index: u32) -> i8{
+        return *self.arr.get_unchecked(index as usize);
     }
     /// Access and flip the sign of the spin
     #[inline]
-    pub unsafe fn uset_neg(&mut self, index: usize){
-        *self.arr.get_unchecked_mut(index) *= -1;
+    pub unsafe fn uset_neg(&mut self, index: u32){
+        *self.arr.get_unchecked_mut(index as usize) *= -1;
     }
 
     pub fn mag(&self) -> i64{
@@ -128,9 +128,9 @@ impl IsingState{
     }
 }
 
-pub fn rand_ising_state<I: Instance<usize, IsingState>, Rn: Rng+?Sized>(n: usize, instance: &I, rng: &mut Rn) -> IsingState{
+pub fn rand_ising_state<I: Instance<u32, IsingState>, Rn: Rng+?Sized>(n: u32, instance: &I, rng: &mut Rn) -> IsingState{
     let mut arr = Vec::new();
-    arr.reserve(n);
+    arr.reserve(n as usize);
     for _ in 0..n{
         arr.push( 2*rng.sample(Uniform::new_inclusive(0, 1)) - 1);
     }
@@ -153,13 +153,63 @@ impl IndexMut<usize> for IsingState{
     }
 }
 
-impl State<usize> for IsingState{
-    fn accept_move(&mut self, mv: usize) {
+impl State<u32> for IsingState{
+    fn accept_move(&mut self, mv: u32) {
         unsafe{
             self.uset_neg(mv);
         }
     }
 }
+
+pub struct IsingSampler<'a>{
+    pub samp: MetropolisSampler<'a, f32, u32, IsingState, BqmIsingInstance, Uniform<u32>>
+}
+
+impl<'a> IsingSampler<'a>{
+    pub fn new(instance: &'a BqmIsingInstance, beta: f32, n: u32) -> Self{
+        let samp = MetropolisSampler::new_uniform(instance, beta, n);
+        return Self{samp};
+    }
+}
+
+impl<'a, Rn: Rng+?Sized> Sampler<Rn>
+for IsingSampler<'a>
+    where
+{
+    type SampleType = IsingState;
+    //type ParamType = I::Param;
+
+    fn advance(&self, state: &mut IsingState, rng: &mut Rn) {
+        let mv = rng.sample(&self.samp.rand_distr);
+        let de = self.samp.advance_impl(mv, state, rng);
+        state.energy += de.unwrap_or(0.0);
+    }
+
+    fn sweep(&self, state: &mut IsingState, rng: &mut Rn){
+        let mut de = 0.0;
+        let n = state.arr.len() as u32;
+        for i in 0..n{
+            let dei = self.samp.advance_impl(i, state, rng);
+            de += dei.unwrap_or(0.0);
+        }
+        state.energy += de;
+    }
+}
+
+
+impl<'a> Macrostate<f32>
+for IsingSampler<'a>{
+    type Microstate = IsingState;
+
+    fn beta(&self) -> f32 {
+        return self.samp.beta();
+    }
+
+    fn energy(&self, st: &mut IsingState) -> f32 {
+        return self.samp.energy(st);
+    }
+}
+
 
 /// An Ising instance specified by an arbitrary binary quadratic model
 /// in sparse matrix form.
@@ -168,15 +218,15 @@ impl State<usize> for IsingState{
 ///
 /// where $h_i$ are the biases and $J_{ij}$ are the couplings
 pub struct BqmIsingInstance{
-    pub offset: f64,
-    pub bias: Vec<f64>,
-    pub coupling: CsMat<f64>,
-    pub coupling_vecs: Vec<Vec<(usize, f64)>>,
+    pub offset: f32,
+    pub bias: Vec<f32>,
+    pub coupling: CsMat<f32>,
+    pub coupling_vecs: Vec<Vec<(u32, f32)>>,
     pub suscept_coefs: Vec<Vec<f64>>
 }
 
 impl BqmIsingInstance{
-    pub fn new_zero_bias(coupling: CsMat<f64>) -> Self{
+    pub fn new_zero_bias(coupling: CsMat<f32>) -> Self{
         let (n1, n2) = coupling.shape();
         if n1 != n2{
             panic!("couplings matrix must be square, but has shape {}, {}",n1, n2);
@@ -188,7 +238,7 @@ impl BqmIsingInstance{
                 if i == j{
                     panic!("Expected a zero-bias Csr instance");
                 }
-                coupling_vecs[i].push((j, K));
+                coupling_vecs[i].push((j.to_u32().unwrap(), K as f32));
             }
         }
         let mut bias = Vec::new();
@@ -215,17 +265,17 @@ impl BqmIsingInstance{
                     if i != j {
                         offset += K / 8.0;
                         tri_mat.add_triplet(i, j, K/4.0);
-                        coupling_vecs[i].push((j, K/4.0));
+                        coupling_vecs[i].push((j.to_u32().unwrap(), (K/4.0)));
                         bias[i] += K / 4.0;
                     } else {
                         offset += K / 2.0;
                         bias[i] += K / 2.0;
-                        coupling_vecs[i].push((j, K/2.0));
+                        coupling_vecs[i].push((j.to_u32().unwrap(), (K/2.0)));
                     }
                 } else {
                     if i != j {
                         tri_mat.add_triplet(i, j, K);
-                        coupling_vecs[i].push((j, K));
+                        coupling_vecs[i].push((j.to_u32().unwrap(), K));
                     } else {
                         bias[i] = K;
                     }
@@ -269,18 +319,18 @@ impl BqmIsingInstance{
         return chi;
     }
 }
-impl Instance<usize, IsingState> for BqmIsingInstance {
-    type Energy = f64;
+impl Instance<u32, IsingState> for BqmIsingInstance {
+    type Energy = f32;
 
-    fn energy_ref(&self, state: & IsingState) -> f64 {
+    fn energy_ref(&self, state: & IsingState) -> Self::Energy {
         let mut total_energy = self.offset;
-        for (i, row)in self.coupling_vecs.iter().enumerate(){
+        for ( row, i)in self.coupling_vecs.iter().zip(0..){
             unsafe {
-                let mut h: f64 = 0.0;
-                let si = state.uget(i) as f64;
-                h += *self.bias.get_unchecked(i) ;
+                let mut h = 0.0;
+                let si = state.uget(i) as Self::Energy;
+                h += *self.bias.get_unchecked(i as usize) ;
                 for &(j, K) in row.iter() {
-                    let sj = state.uget(j) as f64;
+                    let sj = state.uget(j) as Self::Energy;
                     h += (K * sj) / 2.0;
                 }
                 total_energy += h * si;
@@ -289,7 +339,7 @@ impl Instance<usize, IsingState> for BqmIsingInstance {
 
         return total_energy;
     }
-    fn energy(&self, state: &mut IsingState) -> f64 {
+    fn energy(&self, state: &mut IsingState) -> Self::Energy {
         if state.energy_init{
             return state.energy;
         }
@@ -302,15 +352,15 @@ impl Instance<usize, IsingState> for BqmIsingInstance {
     /// The \Delta E of a move proposal to flip spin i is
     ///   H(-s_i) - H(s_i) = -2 h_i s_i - 2 \sum_j J_{ij} s_i s_j
     /// Safe only if the move is within the size of the state
-    unsafe fn delta_energy(&self, state: &mut IsingState, mv: &usize) -> f64 {
+    unsafe fn delta_energy(&self, state: &mut IsingState, mv: &u32) -> Self::Energy {
         let mut delta_e = 0.0;
-        let &i = mv;
-        delta_e += *self.bias.get_unchecked(i) as f64;
-        let row = self.coupling_vecs.get_unchecked(i);
+        let i = *mv;
+        delta_e += *self.bias.get_unchecked(i as usize);
+        let row = self.coupling_vecs.get_unchecked(i as usize);
         for &(j, K) in row.iter(){
-            delta_e  += K * (state.uget(j) as f64);
+            delta_e  += K * (state.uget(j) as Self::Energy);
         }
-        let si = state.uget(i) as f64;
+        let si = state.uget(i) as Self::Energy;
         delta_e *= -2.0 * si;
 
         return delta_e;
@@ -392,7 +442,7 @@ pub struct PtIcmMinResults{
     pub params: PtIcmParams,
     pub timing: f64,
     pub gs_time_steps: Vec<u32>,
-    pub gs_energies: Vec<f64>,
+    pub gs_energies: Vec<f32>,
     pub gs_states: Vec<Vec<u64>>,
     pub num_measurements: u32,
     pub instance_size: u32,
@@ -429,7 +479,7 @@ pub struct PtIcmThermalSamples{
 }
 
 impl PtIcmThermalSamples{
-    fn new(beta_arr: &Vec<f64>, instance_size: u64, capacity: usize, samp_capacity: usize,
+    fn new(beta_arr: &Vec<f32>, instance_size: u64, capacity: usize, samp_capacity: usize,
            nchi: u32,
            compression_level: u8) -> Self{
         let num_betas = beta_arr.len();
@@ -468,7 +518,7 @@ impl PtIcmThermalSamples{
         return me;
     }
 
-    fn measure(&mut self, pt_state: & Vec<pt::PTState<IsingState>>, instance:& BqmIsingInstance) {
+    fn measure(&mut self, pt_state: &mut Vec<pt::PTState<IsingState>>, instance:& BqmIsingInstance) {
         let num_chains = pt_state.len();
         let num_betas = pt_state[0].states.len();
         let n = pt_state[0].states[0].arr.len();
@@ -480,8 +530,8 @@ impl PtIcmThermalSamples{
 
         for i in 0..num_betas{
             for j in 0..num_chains{
-                let isn = &pt_state[j].states[i];
-                let e = instance.energy_ref(isn);
+                let isn = &mut pt_state[j].states[i];
+                let e = instance.energy(isn);
                 self.e[i].push(e as f32);
             }
             for j in 0..(num_chains/2) {
@@ -532,28 +582,29 @@ impl PtIcmThermalSamples{
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
 pub struct BetaSpec{
-    pub beta_min: f64,
-    pub beta_max: f64,
+    pub beta_min: f32,
+    pub beta_max: f32,
     pub num_beta: u32,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum BetaOptions{
     Geometric(BetaSpec),
-    Arr(Vec<f64>)
+    Arr(Vec<f32>)
 }
 
 impl BetaOptions{
-    pub fn new_geometric(beta_min: f64, beta_max: f64, num_beta: u32) -> Self{
+    pub fn new_geometric(beta_min: f32, beta_max: f32, num_beta: u32) -> Self{
         return BetaOptions::Geometric(BetaSpec{beta_min, beta_max, num_beta});
     }
-    pub fn get_beta_arr(&self) -> Vec<f64>{
+    pub fn get_beta_arr(&self) -> Vec<f32>{
         return match &self {
             BetaOptions::Geometric(b) => {
-                geometric_beta_schedule(b.beta_min, b.beta_max, b.num_beta as usize)
+                geometric_beta_schedule(b.beta_min as f64, b.beta_max as f64, b.num_beta as usize)
+                    .into_iter().map(|x| x as f32).collect()
             }
             BetaOptions::Arr(v) => {
-                v.to_owned()
+                ToOwned::to_owned(v)
             }
         };
     }
@@ -564,7 +615,7 @@ pub struct PtIcmParams {
     pub num_sweeps: u32,
     pub warmup_fraction: f64,
     pub beta: BetaOptions,
-    pub lo_beta: f64,
+    pub lo_beta: f32,
     pub icm: bool,
     pub num_replica_chains: u32,
     pub threads: u32,
@@ -600,7 +651,7 @@ pub struct PtIcmRunner<'a>{
     params: &'a PtIcmParams,
     instance: &'a BqmIsingInstance,
     g: Csr<(), ()>,
-    beta_vec: Vec<f64>,
+    beta_vec: Vec<f32>,
     meas_init: u32,
     lo_beta_idx: usize
 }
@@ -610,7 +661,7 @@ impl<'a> PtIcmRunner<'a>{
         let beta_vec = params.beta.get_beta_arr();
         let num_betas = beta_vec.len();
         let beta_arr = Array1::from_vec(beta_vec.clone());
-        let beta_diff : Array1<f64> = beta_arr.slice(s![1..]).to_owned() - beta_arr.slice(s![..-1]);
+        let beta_diff : Array1<f32> = beta_arr.slice(s![1..]).to_owned() - beta_arr.slice(s![..-1]);
         if !beta_diff.iter().all(|&x|x>=0.0) {
             panic!("beta array must be non-decreasing")
         }
@@ -707,7 +758,7 @@ impl<'a> PtIcmRunner<'a>{
             0
         } as usize;
         let samplers: Vec<_> = self.beta_vec.iter()
-            .map(|&b | MetropolisSampler::new_uniform(self.instance,b, n))
+            .map(|&b | IsingSampler::new(self.instance,b, n as u32))
             .collect();
         let pt_sampler = ppt::parallel_tempering_sampler(samplers);
         let mut pt_results = PtIcmMinResults::new(self.params.clone(),num_betas as u32, n as u32);
@@ -753,7 +804,7 @@ impl<'a> PtIcmRunner<'a>{
         } as usize;
 
         let samplers: Vec<_> = self.beta_vec.iter()
-            .map(|&b | MetropolisSampler::new_uniform(self.instance,b, n))
+            .map(|&b | IsingSampler::new(self.instance,b, n as u32))
             .collect();
         let pt_sampler = pt::parallel_tempering_sampler(samplers);
         let mut pt_results = PtIcmMinResults::new(self.params.clone(),num_betas as u32, n as u32);
@@ -780,7 +831,7 @@ impl<'a> PtIcmRunner<'a>{
 
     fn generate_init_state<Rn: Rng+?Sized>(&self, rng: &mut Rn) -> Vec<pt::PTState<IsingState>>{
         // randomly generate initial states
-        let n = self.instance.size();
+        let n = self.instance.size() as u32;
         let num_betas = self.beta_vec.len();
         let mut pt_state = Vec::new();
         for _ in 0..self.params.num_replica_chains{
@@ -815,7 +866,7 @@ impl<'a> PtIcmRunner<'a>{
     }
 
     fn apply_measurements(&self, i: u32, pt_state: &mut Vec<pt::PTState<IsingState>>,
-                          minimum_e: &mut Option<f64>, pt_results: &mut PtIcmMinResults,
+                          minimum_e: &mut Option<f32>, pt_results: &mut PtIcmMinResults,
                           pt_samples: &mut PtIcmThermalSamples)
     {
 
@@ -834,7 +885,7 @@ impl<'a> PtIcmRunner<'a>{
             // Measure statistics/lowest energy state so far
             let mut min_energies = Vec::with_capacity(pt_state.len());
             for pts in pt_state.iter_mut() {
-                let energies : Vec<f64> = pts.states_mut().iter_mut()
+                let energies : Vec<f32> = pts.states_mut().iter_mut()
                     .map(|st| self.instance.energy(st)).collect();
                 let (i1, &e1) = energies.iter().enumerate()
                     .min_by(|&x, &y| x.1.partial_cmp(&y.1).unwrap())
@@ -885,7 +936,7 @@ pub fn pt_optimize_beta(
     instances: &Vec<BqmIsingInstance>,
     params: &PtIcmParams,
     num_iters: u32,
-) -> (PtIcmParams, Array2<f64>) {
+) -> (PtIcmParams, Array2<f32>) {
     use interp::interp;
     use tamc_core::util::{StepwiseMeasure, finite_differences, monotonic_bisection};
 
@@ -902,10 +953,10 @@ pub fn pt_optimize_beta(
     let nt = init_beta_vec.len();
     // We use a momentum-directed iteration optimizer
     let mut momentum_beta = Array1::from_vec(init_beta_vec[1..nt-1].to_vec());
-    let mut tau_hist : Vec<Array1<f64>> = Vec::new();
+    let mut tau_hist : Vec<Array1<f32>> = Vec::new();
 
     for i in 0..num_iters {
-        let alpha = alpha_init + (i as f64 / (num_iters-1) as f64) * (alpha_end - alpha_init);
+        let alpha = alpha_init + (i as f32 / (num_iters-1) as f32) * (alpha_end - alpha_init);
         println!("* Iteration {}.\n* Step Size: {}", i, alpha);
 
         let beta_vec = params.beta.get_beta_arr();
@@ -920,15 +971,15 @@ pub fn pt_optimize_beta(
             .map(|(p, s)| p.run(s.clone()).2).collect();
         // Gather the diffusion histograms for each temperature summed over all replica chains
         // Also evaluate the round trip times
-        let mut dif_probs_vec : Vec<Array1<f64>> = Vec::with_capacity(num_instances);
-        let mut tau_vec: Vec<f64> = Vec::with_capacity(num_instances);
+        let mut dif_probs_vec : Vec<Array1<f32>> = Vec::with_capacity(num_instances);
+        let mut tau_vec: Vec<f32> = Vec::with_capacity(num_instances);
         for s in results.iter(){
             let dif_hists : Vec<ArrayView2<u32>>= s.iter().map(|ptstate| ptstate.diffusion_hist.view()).collect();
             // number of round trips in all replica chains
             let rts : u32 =  s.iter().map(|ptstate| ptstate.round_trips).sum();
-            let rt_per_rep = rts as f64 / ((num_chains * nt as u32 ) as f64 );
+            let rt_per_rep = rts as f32 / ((num_chains * nt as u32 ) as f32 );
             // The typical rount-trip time per replica is  num_sweeps / (N_t * \bar{\tau} )
-            let tau = if rts == 0 { 0.0 } else { (params.num_sweeps as f64)/rt_per_rep };
+            let tau = if rts == 0 { 0.0 } else { (params.num_sweeps as f32)/rt_per_rep };
             tau_vec.push(tau);
             let n = dif_hists.len();
             let sh = dif_hists[0].raw_dim();
@@ -936,7 +987,7 @@ pub fn pt_optimize_beta(
             for h in dif_hists.iter() {
                 sum_dif_hists += h;
             }
-            let sum_dif_hists = sum_dif_hists.map(|&x| x as f64);
+            let sum_dif_hists = sum_dif_hists.map(|&x| x as f32);
             let tots = sum_dif_hists.sum_axis(Axis(1));
             // n_maxbeta / (n_minbeta + n_maxbeta)
             let dif_probs = sum_dif_hists.slice(s![.., 1]).to_owned() / tots;
@@ -945,8 +996,9 @@ pub fn pt_optimize_beta(
         println!("(Peek) diffusion distribution: {:5.4}", &dif_probs_vec[0]);
         let tau_arr = Array1::from_vec(tau_vec);
         println!("Round-trip times (sweeps):\n{}", tau_arr);
-        let d_dif_vec : Vec<Array1<f64>> = dif_probs_vec.iter()
-            .map(|f| Array1::from_vec(finite_differences(beta_arr.as_slice().unwrap(),f.as_slice().unwrap())) )
+        let d_dif_vec : Vec<Array1<f32>> = dif_probs_vec.iter()
+            .map(|f| Array1::from_vec(finite_differences(beta_arr.as_slice().unwrap(),
+                                                         f.as_slice().unwrap())) )
             .collect();
         let mut weighted_d_dif = Array1::zeros(nt);
         for (&tau, d_dif) in tau_arr.iter().zip(d_dif_vec.iter()){
@@ -954,19 +1006,19 @@ pub fn pt_optimize_beta(
         }
         tau_hist.push(tau_arr);
         println!("Weighed df/dT: {:5.4}", weighted_d_dif);
-        let unnorm_eta2 : Array1<f64> = weighted_d_dif / &beta_weights;
-        let unnorm_eta = unnorm_eta2.map(|&x| f64::sqrt(x.max(0.0)));
+        let unnorm_eta2 : Array1<f32> = weighted_d_dif / &beta_weights;
+        let unnorm_eta = unnorm_eta2.map(|&x| f32::sqrt(x.max(0.0)));
         // Trapezoid rule correction
         let unnorm_eta = (unnorm_eta.slice(s![0..-1]).to_owned() + unnorm_eta.slice(s![1..]))/2.0;
         let z = unnorm_eta.sum();
-        if z < f64::EPSILON{
+        if z < f32::EPSILON{
             warn!(" ** Insufficient round trips for eta CDF");
             continue;
         }
-        let eta_arr : Array1<f64> = &unnorm_eta / z;
+        let eta_arr : Array1<f32> = &unnorm_eta / z;
         println!("Eta: {:5.4}", eta_arr);
         let eta_vec = eta_arr.into_raw_vec();
-        let eta_cdf : Vec<f64>= eta_vec.iter()
+        let eta_cdf : Vec<f32>= eta_vec.iter()
             .scan(0.0, |acc, x|{let acc0 = *acc; *acc += x; Some(acc0)})
             .chain(std::iter::once(1.0))
             .collect();
@@ -980,7 +1032,7 @@ pub fn pt_optimize_beta(
         };
         let xdivs = monotonic_divisions(eta_fn, (nt -1) as u32);
         let xdivs = Array1::from(xdivs);
-        let mut beta_divs : Array1<f64> = xdivs*(beta_max - beta_min) + beta_min;
+        let mut beta_divs : Array1<f32> = xdivs*(beta_max - beta_min) + beta_min;
         let calc_beta_divs = beta_divs.clone();
         // Mean of |log10(b_calc/b_current)|
         let mut err = 0.0;
@@ -988,17 +1040,17 @@ pub fn pt_optimize_beta(
         // Update momentum
         for (bp, &b1) in momentum_beta.iter_mut()
             .zip(calc_beta_divs.iter().skip(1).take(nt-2)){
-            *bp = f64::exp(0.85 * (*bp).ln() + 0.15*b1.ln());
+            *bp = f32::exp(0.85 * (*bp).ln() + 0.15*b1.ln());
         }
         println!("Momentum beta:\n{:5.4}", momentum_beta);
 
         for (b2, (b1, bp)) in beta_divs.iter_mut().skip(1).take(nt-2)
                 .zip(beta_vec.iter().skip(1).take(nt-2).zip(momentum_beta.iter())){
-            let b = f64::exp(alpha * bp.ln() + (1.0-alpha)*b1.ln());
-            err += f64::abs(b2.log10() - b1.log10());
+            let b = f32::exp(alpha * bp.ln() + (1.0-alpha)*b1.ln());
+            err += f32::abs(b2.log10() - b1.log10());
             *b2 = b
         }
-        err /= nt as f64;
+        err /= nt as f32;
         println!("Next beta:\n{:5.4}", beta_divs);
         println!("Mean abs log rel_err: {}", err);
 
@@ -1020,7 +1072,7 @@ pub fn pt_optimize_beta(
 
     let final_beta = Array1::from_vec(params.beta.get_beta_arr());
     println!("Final temperature array:\n{:6.5}", final_beta);
-    let tau_view : Vec<ArrayView1<f64>> = tau_hist.iter().map(|v|v.view()).collect();
+    let tau_view : Vec<ArrayView1<f32>> = tau_hist.iter().map(|v|v.view()).collect();
     let tau_hist_arr = ndarray::stack(Axis(0), &tau_view).unwrap();
 
     return (params, tau_hist_arr);
@@ -1061,14 +1113,14 @@ mod tests {
     #[test]
     fn test_ising_2d_sa() {
         let l = 8;
-        let n = l*l;
+        let n: u32 = l*l;
         let ensemble_size= 16;
         let beta0 :f64 = 0.02;
         let betaf :f64 = 2.0;
         let num_sweeps = 200;
 
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(1234);
-        let instance = make_ising_2d_instance(l);
+        let instance = make_ising_2d_instance(l as usize);
 
         let mut init_states = Vec::with_capacity(ensemble_size);
         for _ in 0..ensemble_size{
@@ -1092,21 +1144,21 @@ mod tests {
     #[test]
     fn test_ising_2d_pt(){
         let l = 16;
-        let n = l*l;
+        let n: u32 = l*l;
         let beta0 :f64 = 0.02;
         let betaf :f64 = 2.0;
         let num_betas = 16;
         let num_sweeps = 200;
 
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(1234);
-        let instance = make_ising_2d_instance(l);
+        let instance = make_ising_2d_instance(l as usize);
         let mut init_states = Vec::with_capacity(num_betas);
         for _ in 0..num_betas{
             init_states.push(rand_ising_state(n, &instance, &mut rng));
         }
         let betas = geometric_beta_schedule(beta0, betaf, num_betas);
         let samplers: Vec<_> = betas.iter()
-                .map(|&b |MetropolisSampler::new_uniform(&instance,b, n))
+                .map(|&b |MetropolisSampler::new_uniform(&instance,b, n as u32))
                 .collect();
         let pt_sampler = parallel_tempering_sampler(samplers);
         let mut init_state = PTState::new(init_states);

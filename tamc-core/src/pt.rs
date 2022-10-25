@@ -115,13 +115,18 @@ where R: Real, Standard: Distribution<R>
             .zip(state.states.iter_mut())
             .map(|(s,x)| s.energy( x))
             .collect();
-        let delta_es: Vec<R> = energies.iter().skip(1).zip(energies.iter())
+        // E_{i+1} - E_i array
+        let mut delta_es: Vec<R> = energies.iter().skip(1).zip(energies.iter())
             .map(|(&e1, &e2)| e1 - e2)
             .collect();
         for j in 0..n-1{
             let dlt: R = self.delta_beta[j]*delta_es[j];
             if dlt >= R::zero() || (rng.sample::<R, _>(Standard) < R::exp(dlt)){
                 state.swap_states(j);
+                if j < n-2 {
+                    delta_es[j + 1] = delta_es[j + 1] + delta_es[j];
+                }
+                    delta_es[j] = -delta_es[j];
             }
         }
         state.update_round_trips();

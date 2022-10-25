@@ -50,14 +50,14 @@ pub mod connectivity_list{
 }
 
 
-pub fn read_adjacency_list_from_file(filename: &str) -> Result<Vec<BTreeMap<usize, f64>>, std::io::Error> {
+pub fn read_adjacency_list_from_file(filename: &str) -> Result<Vec<BTreeMap<usize, f32>>, io::Error> {
     let file = File::open(filename);
     let file = match file {Ok(f) => f, Err(e) => return Err(e) };
 
     read_adjacency_list(file)
 }
 
-pub fn read_adjacency_list<R: io::Read>(input: R) -> Result<Vec<BTreeMap<usize, f64>>, std::io::Error>
+pub fn read_adjacency_list<R: io::Read>(input: R) -> Result<Vec<BTreeMap<usize, f32>>, io::Error>
 {
     use connectivity_list::parse_line;
     use std::cmp::max;
@@ -65,7 +65,7 @@ pub fn read_adjacency_list<R: io::Read>(input: R) -> Result<Vec<BTreeMap<usize, 
 
     let reader = BufReader::new(input);
 
-    let mut adj_list : Vec<BTreeMap<usize, f64>> = Vec::new();
+    let mut adj_list : Vec<BTreeMap<usize, f32>> = Vec::new();
     for (_i, line) in reader.lines().enumerate(){
         let line = match line{Ok(l) => l, Err(e) => return Err(e)};
         match parse_line(&line){
@@ -75,10 +75,10 @@ pub fn read_adjacency_list<R: io::Read>(input: R) -> Result<Vec<BTreeMap<usize, 
                 if adj_list.len() < m{
                     adj_list.resize(m, Default::default());
                 }
-                adj_list[i].insert(j, h).map(
+                adj_list[i].insert(j, h as f32).map(
                     |h2| println!("The entry ({}, {}) :> {} was overwritten with {}.", i, j, h2, h));
                 if i != j {
-                    adj_list[j].insert(i, h).map(
+                    adj_list[j].insert(i, h as f32).map(
                         |h2| println!("The entry ({}, {}) :> {} was overwritten with {}.", i, j, h2, h));
                 }
             }
@@ -122,7 +122,7 @@ pub fn read_txt_vec<R: io::Read>(input: R) -> Result<Vec<f64>, io::Error>
     Ok(dvec)
 }
 
-pub fn adj_list_to_graph(adj_list: &Vec<BTreeMap<usize, f64>>) -> Graph<f64, f64, Undirected>{
+pub fn adj_list_to_graph(adj_list: &Vec<BTreeMap<usize, f32>>) -> Graph<f32, f32, Undirected>{
     use petgraph::prelude::NodeIndex as Nd;
     let n = adj_list.len();
     let mut graph = Graph::new_undirected();

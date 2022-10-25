@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::sync::Mutex;
 use rayon::prelude::*;
 use tamc::percolation::random_percolation;
@@ -12,7 +13,7 @@ struct Percolate{
     num_samples: u32,
     #[structopt(short,long)]
     prob: f64,
-    #[structop(short,long)]
+    #[structopt(short,long)]
     output: Option<String>,
     instance: String
 }
@@ -43,9 +44,9 @@ fn main() {
 
     if let Some(output_file ) = &args.output{
         let mut f = std::fs::File::create(output_file).unwrap();
-        writeln!("perc, max_cluster");
+        write!(f, "perc, max_cluster").expect("Write failed");
         for (p, cl) in perc_results.iter(){
-            writeln!(f, "{}, {}", p, cl)
+            write!(f, "{}", cl).expect("Write failed")
         }
     }
 }
