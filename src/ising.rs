@@ -987,7 +987,8 @@ pub fn pt_optimize_beta(
             for h in dif_hists.iter() {
                 sum_dif_hists += h;
             }
-            let sum_dif_hists = sum_dif_hists.map(|&x| x as f32);
+            //pseudocount of 1 to prevent division by 0
+            let sum_dif_hists = sum_dif_hists.map(|&x| (x + 1) as f32);
             let tots = sum_dif_hists.sum_axis(Axis(1));
             // n_maxbeta / (n_minbeta + n_maxbeta)
             let dif_probs = sum_dif_hists.slice(s![.., 1]).to_owned() / tots;
