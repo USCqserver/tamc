@@ -38,7 +38,7 @@ impl<St> PTState<St>{
         let n = self.states.len();
         self.num_acceptances = Array1::zeros(n);
         self.diffusion_hist = Array2::zeros((n, 2));
-
+        self.round_trips = 0;
         self.round_trip_tags.clear();
         self.round_trip_tags.resize(n, PTRoundTrip::None);
         self.round_trip_tags[0] = PTRoundTrip::MinBeta;

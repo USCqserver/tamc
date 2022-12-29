@@ -100,7 +100,7 @@ fn bisect_array<F: Fn(Ft)->Ft + Copy,
         return;
     } else if roots.len() == 1{
         let y0 = ytgt[0];
-        let bis = monotonic_bisection(f, y0, xmin, xmax,  Ft::from(1.0e-4).unwrap(), 100000);
+        let bis = monotonic_bisection(f, y0, xmin, xmax,  Ft::from(1.0e-6).unwrap(), 1000000);
         match bis{
             BisResult::Root((x,y)) => { roots[0] = x;}
             BisResult::LoBnd((x, y)) => {
@@ -110,8 +110,6 @@ fn bisect_array<F: Fn(Ft)->Ft + Copy,
                                          y0, xmin, xmax, x, y)}
             BisResult::Failed => { panic!("Bisection for {} in the  interval [{},{}] failed ", y0, xmin, xmax)}
         }
-        let (x,y) = monotonic_bisection(f, y0, xmin, xmax,  Ft::from(1.0e-4).unwrap(), 10000).unwrap_root();
-        roots[0] = x;
     } else {
         let n = roots.len();
         let mid = n/2;
