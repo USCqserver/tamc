@@ -14,8 +14,9 @@ pub fn finite_differences<F:Float>(x: &[F], y: &[F]) -> Vec<F>
     deriv.resize(n, F::zero());
     deriv[0] = delta_y[0] / delta_x[0];
     *deriv.last_mut().unwrap() = *delta_y.last().unwrap()/ *delta_x.last().unwrap();
-    for i in 1..n-1{
-        deriv[i] = delta_y[i] / delta_x[i-1] + delta_y[i-1]/delta_x[i];
+    for i in 1..n-1{ // can be derived from lagrange interpolation
+        deriv[i] = (delta_y[i-1] * delta_x[i] / delta_x[i-1]
+            + delta_y[i] * delta_x[i-1] / delta_x[i]) / (delta_x[i-1] + delta_x[i]);
     }
     return deriv;
 }

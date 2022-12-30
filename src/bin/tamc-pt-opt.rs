@@ -59,6 +59,7 @@ pub fn pt_optimize_beta(
         let beta_meas = StepwiseMeasure::new(beta_vec.clone());
         let beta_weights = Array1::from_vec(beta_meas.weights.clone());
         let beta_arr = Array1::from_vec(beta_vec.clone());
+        let beta_difs = &beta_arr.slice(s![1..]) - &beta_arr.slice(s![0..-1]);
         // Run PT on the current temperature array on all replicas
         let pticm_vec: Vec<PtIcmRunner> = instances.iter()
             .map(|i| PtIcmRunner::new(i, &params)).collect();
@@ -103,25 +104,28 @@ pub fn pt_optimize_beta(
         }
         weighted_d_dif /= sum_tau;
         tau_hist.push(tau_arr);
-        println!("Weighed df/dT: {:5.4}", weighted_d_dif);
-        let unnorm_eta2 : Array1<f32> = weighted_d_dif / &beta_weights;
+        //println!("Weighed df/dT: {:5.4}", weighted_d_dif);
+        let unnorm_eta2 : Array1<f32> = &weighted_d_dif / &beta_weights;
         let unnorm_eta = unnorm_eta2.map(|&x| f32::sqrt(x.max(0.0)));
         // Trapezoid rule correction
-        let unnorm_eta = (unnorm_eta.slice(s![0..-1]).to_owned() + unnorm_eta.slice(s![1..]))/2.0;
-        let z = unnorm_eta.sum();
+        let unnorm_eta_w = (unnorm_eta.slice(s![0..-1]).to_owned() + unnorm_eta.slice(s![1..]))/2.0;
+        // eta times the integration measure
+        let unnorm_eta_w: Array1<f32> = unnorm_eta_w * beta_difs;
+        let z = unnorm_eta_w.sum();
         if z < f32::EPSILON{
             warn!(" ** Insufficient round trips for eta CDF");
             continue;
         }
-        let eta_arr : Array1<f32> = &unnorm_eta / z;
-        println!("Eta: {:5.4}", eta_arr);
-        let eta_vec = eta_arr.into_raw_vec();
-        let eta_cdf : Vec<f32>= eta_vec.iter()
+        let eta_arr_samps = &unnorm_eta / z; // Eta at the temperature points
+        let eta_arr_w : Array1<f32> = &unnorm_eta_w / z; // Weighed eta for integration
+        //println!("Eta: {:5.4}", eta_arr);
+        let eta_w_vec = eta_arr_w.into_raw_vec();
+        let eta_cdf : Vec<f32>= eta_w_vec.iter()
             .scan(0.0, |acc, x|{let acc0 = *acc; *acc += x; Some(acc0)})
             .chain(std::iter::once(1.0))
             .collect();
         let eta_cdf_arr = Array1::from_vec(eta_cdf.clone());
-        println!("Eta CDF:\n {:5.4}", eta_cdf_arr);
+        //println!("Eta CDF:\n {:5.4}", eta_cdf_arr);
         let &beta_min = &beta_vec[0];
         let &beta_max = &beta_vec[nt -1];
         let eta_fn = |x|{
@@ -134,12 +138,12 @@ pub fn pt_optimize_beta(
         let calc_beta_divs = beta_divs.clone();
         // Mean of |log10(b_calc/b_current)|
         let mut err = 0.0;
-        println!("Calculated beta:\n{:5.4}", beta_divs);
+        //println!("Calculated beta:\n{:5.4}", beta_divs);
         // Update momentum
         for (bp, &b1) in momentum_beta.iter_mut().zip(calc_beta_divs.iter()){
             *bp = f32::exp(m * (*bp).ln() + (1.0 - m) * b1.ln());
         }
-        println!("Momentum beta:\n{:5.4}", momentum_beta);
+        //println!("Momentum beta:\n{:5.4}", momentum_beta);
 
         for (b2, (b1, bp)) in beta_divs.iter_mut()
             .zip(beta_vec.iter().zip(momentum_beta.iter()))
@@ -149,9 +153,20 @@ pub fn pt_optimize_beta(
             *b2 = b
         }
         err /= nt as f32;
-        println!("Next beta:\n{:5.4}", beta_divs);
-        println!("Mean abs log rel_err: {}", err);
 
+        println!("{:^7}{:^7}{:^7}{:^7}{:^7}{:^7}",
+                 "DDif", "eta", "etaCDF", "beta0", "betaM", "beta");
+        println!("--------------------------------------------------");
+
+        for i in 0..nt{
+            print!(" {:6} ", weighted_d_dif[i]);
+            print!(" {:6.5} ", eta_arr_samps[i]);
+            print!(" {:6.5} ", eta_cdf_arr[i]);
+            print!(" {:6.5} ", calc_beta_divs[i]);
+            print!(" {:6.5} ", momentum_beta[i]);
+            print!(" {:6.5} \n", beta_divs[i]);
+        }
+        println!("Mean abs log rel_err: {}", err);
         params.beta = BetaOptions::Arr(beta_divs.into_raw_vec());
         // let f_arr = results.iter()
         //     .map(|res| res.final_state.iter().map(|c|))
