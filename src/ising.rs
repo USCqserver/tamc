@@ -936,6 +936,8 @@ pub fn pt_optimize_beta(
     instances: &Vec<BqmIsingInstance>,
     params: &PtIcmParams,
     num_iters: u32,
+    alpha: f32,
+    m: f32
 ) -> (PtIcmParams, Array2<f32>) {
     use interp::interp;
     use tamc_core::util::{StepwiseMeasure, finite_differences, monotonic_bisection};
@@ -944,19 +946,16 @@ pub fn pt_optimize_beta(
     let mut params = params.clone();
     let num_chains = params.num_replica_chains;
     // Anneal the step-size over num_iters
-    let alpha_init = 0.2;
-    let alpha_end = 0.2;
 
     let mut init_states = Vec::with_capacity(instances.len());
     init_states.resize(instances.len(), None);
     let init_beta_vec = params.beta.get_beta_arr();
     let nt = init_beta_vec.len();
     // We use a momentum-directed iteration optimizer
-    let mut momentum_beta = Array1::from_vec(init_beta_vec[1..nt-1].to_vec());
+    let mut momentum_beta = Array1::from_vec(init_beta_vec.clone());
     let mut tau_hist : Vec<Array1<f32>> = Vec::new();
 
     for i in 0..num_iters {
-        let alpha = alpha_init + (i as f32 / (num_iters-1) as f32) * (alpha_end - alpha_init);
         println!("* Iteration {}.\n* Step Size: {}", i, alpha);
 
         let beta_vec = params.beta.get_beta_arr();
@@ -996,6 +995,7 @@ pub fn pt_optimize_beta(
         }
         println!("(Peek) diffusion distribution: {:5.4}", &dif_probs_vec[0]);
         let tau_arr = Array1::from_vec(tau_vec);
+        let sum_tau = tau_arr.sum();
         println!("Round-trip times (sweeps):\n{}", tau_arr);
         let d_dif_vec : Vec<Array1<f32>> = dif_probs_vec.iter()
             .map(|f| Array1::from_vec(finite_differences(beta_arr.as_slice().unwrap(),
@@ -1005,6 +1005,7 @@ pub fn pt_optimize_beta(
         for (&tau, d_dif) in tau_arr.iter().zip(d_dif_vec.iter()){
             weighted_d_dif.scaled_add(tau, d_dif);
         }
+        weighted_d_dif /= sum_tau;
         tau_hist.push(tau_arr);
         println!("Weighed df/dT: {:5.4}", weighted_d_dif);
         let unnorm_eta2 : Array1<f32> = weighted_d_dif / &beta_weights;
@@ -1039,14 +1040,14 @@ pub fn pt_optimize_beta(
         let mut err = 0.0;
         println!("Calculated beta:\n{:5.4}", beta_divs);
         // Update momentum
-        for (bp, &b1) in momentum_beta.iter_mut()
-            .zip(calc_beta_divs.iter().skip(1).take(nt-2)){
-            *bp = f32::exp(0.85 * (*bp).ln() + 0.15*b1.ln());
+        for (bp, &b1) in momentum_beta.iter_mut().zip(calc_beta_divs.iter()){
+            *bp = f32::exp(m * (*bp).ln() + (1.0 - m) * b1.ln());
         }
         println!("Momentum beta:\n{:5.4}", momentum_beta);
 
-        for (b2, (b1, bp)) in beta_divs.iter_mut().skip(1).take(nt-2)
-                .zip(beta_vec.iter().skip(1).take(nt-2).zip(momentum_beta.iter())){
+        for (b2, (b1, bp)) in beta_divs.iter_mut()
+                .zip(beta_vec.iter().zip(momentum_beta.iter()))
+                .skip(1).take(nt-2){
             let b = f32::exp(alpha * bp.ln() + (1.0-alpha)*b1.ln());
             err += f32::abs(b2.log10() - b1.log10());
             *b2 = b

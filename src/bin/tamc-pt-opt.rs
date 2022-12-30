@@ -10,6 +10,10 @@ use tamc::ising::{BqmIsingInstance, PtIcmParams};
 struct PtOptim{
     #[structopt(long, default_value="1000")]
     max_iters: u32,
+    #[structopt(long, default_value="0.2")]
+    step_size: f32,
+    #[structopt(long, default_value="0.85")]
+    momentum: f32,
     #[structopt(long, default_value="opt_params.yml", help="Destination for optimized parameters")]
     opt_params: String,
     #[structopt(long, default_value="tau_hist.csv")]
@@ -17,6 +21,8 @@ struct PtOptim{
     params: String,
     instances: Vec<String>
 }
+
+
 
 fn main() {
     let prog : PtOptim = StructOpt::from_args();
@@ -29,7 +35,8 @@ fn main() {
     let opts: Method= serde_yaml::from_str(&yaml_str).unwrap();
     match opts{
         Method::PT(pt_params) => {
-            let (opt_params, tau_hist) = ising::pt_optimize_beta(&instance_vec, &pt_params, prog.max_iters);
+            let (opt_params, tau_hist) = ising::pt_optimize_beta(
+                &instance_vec, &pt_params, prog.max_iters, prog.step_size, prog.momentum);
             let opt_method = Method::PT(opt_params);
             let yaml_string = serde_yaml::to_string(&opt_method).unwrap();
             println!("{}", &yaml_string);
