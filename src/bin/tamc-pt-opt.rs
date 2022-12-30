@@ -19,6 +19,8 @@ struct PtOptim{
     step_size: f32,
     #[structopt(long, default_value="0.85")]
     momentum: f32,
+    #[structopt(long, default_value="0.02", help="Covergence tolerance criterion (MAE of log-betas)")]
+    tolerance: f32,
     #[structopt(long, default_value="opt_params.yml", help="Destination for optimized parameters")]
     opt_params: String,
     #[structopt(long, default_value="tau_hist.csv")]
@@ -33,7 +35,8 @@ pub fn pt_optimize_beta(
     params: &PtIcmParams,
     num_iters: u32,
     alpha: f32,
-    m: f32
+    m: f32,
+    tol: f32
 ) -> (PtIcmParams, Array2<f32>) {
     use interp::interp;
     use tamc_core::util::{StepwiseMeasure, finite_differences, monotonic_bisection};
@@ -176,7 +179,7 @@ pub fn pt_optimize_beta(
                 for r in res.iter_mut(){ r.reset_tags() };
                 Some(res) })
             .collect();
-        if err < 2.0e-2 {
+        if err < tol {
             println!(" ** Relative Error converged");
             break;
         }
@@ -203,7 +206,7 @@ fn main() {
     match opts{
         Method::PT(pt_params) => {
             let (opt_params, tau_hist) = pt_optimize_beta(
-                &instance_vec, &pt_params, prog.max_iters, prog.step_size, prog.momentum);
+                &instance_vec, &pt_params, prog.max_iters, prog.step_size, prog.momentum, prog.tolerance);
             let opt_method = Method::PT(opt_params);
             let yaml_string = serde_yaml::to_string(&opt_method).unwrap();
             println!("{}", &yaml_string);
