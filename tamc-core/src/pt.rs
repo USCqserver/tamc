@@ -8,9 +8,11 @@ use serde::{Serialize, Deserialize};
 
 #[derive(Copy, Clone, Serialize, Deserialize)]
 pub enum PTRoundTrip{
-    None,
-    MinBeta,
-    MaxBeta
+    None, // untagged
+    MinBeta, // origin at minimum beta
+    MaxBeta, // origin at maximum beta
+    MinBetaReflected, // reflected from minimum beta, origin from maximum beta
+    MaxBetaReflected, // reflected from maximum beta, origin from minimum beta
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -50,23 +52,33 @@ impl<St> PTState<St>{
         self.num_acceptances[j] += 1;
     }
     pub(crate) fn update_round_trips(&mut self){
-        if let PTRoundTrip::MaxBeta = self.round_trip_tags[0]{
-            self.round_trips += 1;
-        }
-        // Apply round-trip tags
-        self.round_trip_tags[0] = PTRoundTrip::MinBeta;
-        *self.round_trip_tags.last_mut().unwrap() = PTRoundTrip::MaxBeta;
-        // Increment round-trip histogram
+        let lowest_tag = &mut self.round_trip_tags[0];
+        match *lowest_tag{
+            PTRoundTrip::None => {*lowest_tag = PTRoundTrip::MinBeta},
+            PTRoundTrip::MinBeta => {},
+            PTRoundTrip::MinBetaReflected => {},
+            PTRoundTrip::MaxBetaReflected => {self.round_trips += 1; *lowest_tag=PTRoundTrip::MinBeta},
+            PTRoundTrip::MaxBeta => {*lowest_tag=PTRoundTrip::MinBetaReflected}
+        };
+        let highest_tag = self.round_trip_tags.last_mut().unwrap();
+        match *highest_tag{
+            PTRoundTrip::None => {*highest_tag = PTRoundTrip::MaxBeta},
+            PTRoundTrip::MaxBeta => {},
+            PTRoundTrip::MaxBetaReflected => {},
+            PTRoundTrip::MinBetaReflected => {self.round_trips += 1; *highest_tag=PTRoundTrip::MaxBeta},
+            PTRoundTrip::MinBeta => {*highest_tag=PTRoundTrip::MaxBetaReflected}
+        };
+        // Increment diffusion histogram
         for (mut h, &t) in self.diffusion_hist.axis_iter_mut(Axis(0))
             .zip(self.round_trip_tags.iter()){
             match t{
-                PTRoundTrip::None => {},
-                PTRoundTrip::MinBeta => {
+                PTRoundTrip::MinBeta | PTRoundTrip::MinBetaReflected  => {
                     h[0] += 1;
                 }
-                PTRoundTrip::MaxBeta => {
+                PTRoundTrip::MaxBeta | PTRoundTrip::MaxBetaReflected => {
                     h[1] += 1;
                 }
+                _ => {},
             };
         }
     }
