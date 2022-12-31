@@ -157,17 +157,17 @@ pub fn pt_optimize_beta(
         }
         err /= nt as f32;
 
-        println!("{:^7}{:^7}{:^7}{:^7}{:^7}{:^7}",
+        println!("{:^9}{:^9}{:^9}{:^9}{:^9}{:^9}",
                  "DDif", "eta", "etaCDF", "beta0", "betaM", "beta");
         println!("--------------------------------------------------");
 
         for i in 0..nt{
-            print!(" {:6} ", weighted_d_dif[i]);
-            print!(" {:6.5} ", eta_arr_samps[i]);
-            print!(" {:6.5} ", eta_cdf_arr[i]);
-            print!(" {:6.5} ", calc_beta_divs[i]);
-            print!(" {:6.5} ", momentum_beta[i]);
-            print!(" {:6.5} \n", beta_divs[i]);
+            print!(" {:7.3} ", weighted_d_dif[i]);
+            print!(" {:7.3} ", eta_arr_samps[i]);
+            print!(" {:7.4} ", eta_cdf_arr[i]);
+            print!(" {:7.4} ", calc_beta_divs[i]);
+            print!(" {:7.4} ", momentum_beta[i]);
+            print!(" {:7.4} \n", beta_divs[i]);
         }
         println!("Mean abs log rel_err: {}", err);
         params.beta = BetaOptions::Arr(beta_divs.into_raw_vec());
@@ -190,6 +190,8 @@ pub fn pt_optimize_beta(
     println!("Final temperature array:\n{:6.5}", final_beta);
     let tau_view : Vec<ArrayView1<f32>> = tau_hist.iter().map(|v|v.view()).collect();
     let tau_hist_arr = ndarray::stack(Axis(0), &tau_view).unwrap();
+    //double the number of sweeps
+    params.num_sweeps *= 2;
 
     return (params, tau_hist_arr);
 }
