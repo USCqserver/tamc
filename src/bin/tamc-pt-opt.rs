@@ -6,7 +6,8 @@ use structopt::StructOpt;
 use tamc_core::pt::PTState;
 use tamc::Method;
 use tamc::ising;
-use tamc::ising::{BetaOptions, BqmIsingInstance, IsingState, PtIcmParams, PtIcmRunner};
+use tamc::pt::{BetaOptions, PtIcmParams, PtIcmRunner};
+use tamc::ising::{BqmIsingInstance, IsingState};
 use ndarray::prelude::*;
 use tamc_core::util::monotonic_divisions;
 

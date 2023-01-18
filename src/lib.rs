@@ -29,8 +29,9 @@ pub mod csr;
 pub mod util;
 pub mod ising;
 pub mod percolation;
+pub mod pt;
 use std::fs::File;
-use crate::ising::PtIcmParams;
+use crate::pt::PtIcmParams;
 use std::fmt;
 use std::path::Path;
 
@@ -104,7 +105,7 @@ pub fn run_program(prog: Prog) -> Result<(), Box<dyn Error>>{
         Method::PT(pt_params) => {
             //let results = ising::pt_icm_minimize(&instance,&pt_params);
             println!(" ** Parallel Tempering - ICM **");
-            let pticm = ising::PtIcmRunner::new(&instance, &pt_params);
+            let pticm = pt::PtIcmRunner::new(&instance, &pt_params);
             let results = if pt_params.threads > 1 {
                 pticm.run_parallel()
             } else {
