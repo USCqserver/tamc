@@ -1,10 +1,13 @@
 //! Simulated annealing of a Metropolis sampler
-use crate::traits::{State, Instance, Sampler};
+use std::cell::Cell;
+use num_traits::{FromPrimitive, Num, PrimInt};
+use crate::traits::{State, Instance, Sampler, Macrostate, MacroSampler};
 use crate::ensembles::EnsembleSampler;
 use crate::metropolis::MetropolisSampler;
 use rand::prelude::*;
 use rand::distributions::Standard;
 use num_traits::real::Real;
+use rand::distributions::uniform::SampleUniform;
 
 
 pub fn geometric_beta_schedule(beta0: f64, betaf: f64, num_sweeps: usize) -> Vec<f64>{
@@ -18,33 +21,29 @@ pub fn geometric_beta_schedule(beta0: f64, betaf: f64, num_sweeps: usize) -> Vec
     return beta_schedule;
 }
 
-/// Reference implemenation of simulated annealing
+/// Reference implementation of simulated annealing
 /// with Metropolis MC
 /// using a single thread and Rng
-pub fn simulated_annealing<St, I: Instance<usize, St>, Rn: Rng+?Sized, F: FnMut(usize, &Vec<St>)>
-(
-    instance: &I,
-    init_states: Vec<St>,
-    beta_schedule : &[I::Energy],
+pub fn simulated_annealing<R, N, St, I, D: Distribution<N>, Rn: Rng+?Sized, F: FnMut(usize, &Vec<St>)>(
+    sampler : MetropolisSampler<R, N, St, I, D>,
+    states: &mut Vec<St>,
+    beta_schedule : &[R],
     rng: &mut Rn,
     mut measure: F
-) -> Vec<St>
-    where St: State<usize>, Standard: Distribution<I::Energy>, I::Energy: Copy+Real
+)
+where
+    I: Instance<N, St, Energy=R>,
+    St: State<N>,
+    Standard: Distribution<R>,
+    R: Real,
+    N: Num + FromPrimitive
 {
-    let mut states = init_states;
-    let n = instance.size();
     let num_beta = beta_schedule.len();
-    if num_beta == 0 {
-        return states;
-    }
-    let init_beta = beta_schedule[0];
-    let sampler = MetropolisSampler::new_uniform(instance, init_beta, n);
     let mut ensemble_sampler = EnsembleSampler::new(sampler);
     for i in 0..num_beta{
         ensemble_sampler.sub_sampler.beta = beta_schedule[i];
-        ensemble_sampler.sweep(&mut states,  rng);
+        ensemble_sampler.sweep(states,  rng);
         measure(i, &states);
     }
-
-    return states;
 }
+
