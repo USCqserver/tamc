@@ -222,6 +222,9 @@ fn main() {
                 }
                 write!(f, "\n");
             }
+        },
+        _ => {
+            warn!("Must input a PT method for tamc-pt-opt")
         }
     };
 }
