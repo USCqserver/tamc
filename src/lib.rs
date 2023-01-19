@@ -30,13 +30,14 @@ pub mod util;
 pub mod ising;
 pub mod percolation;
 pub mod pt;
-//pub mod sa;
+pub mod sa;
 pub mod ising_results;
 use std::fs::File;
 use crate::pt::PtIcmParams;
 use std::fmt;
 use std::path::Path;
 use crate::ising::BqmIsingInstance;
+use crate::sa::SaParams;
 
 #[derive(Serialize, Deserialize)]
 pub struct PTOptions{
@@ -75,7 +76,8 @@ impl std::error::Error for PTError{
 
 #[derive(Serialize, Deserialize)]
 pub enum Method{
-    PT(PtIcmParams)
+    PT(PtIcmParams),
+    SA(SaParams)
 }
 
 #[derive(StructOpt)]
@@ -111,18 +113,15 @@ impl Prog{
 
 pub fn run_program(prog: Prog) -> Result<(), Box<dyn Error>>{
     let opts = prog.read_method()?;
+    simple_logger::SimpleLogger::new().with_level(log::LevelFilter::Info).env().init().unwrap();
     match &opts{
         Method::PT(pt_params) => {
             pt::run_parallel_tempering(&prog, &pt_params);
+        }
+        Method::SA(sa_params) => {
+            sa::run_simulated_annealing(&prog, &sa_params);
         }
     };
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
-    }
-}

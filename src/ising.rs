@@ -87,19 +87,31 @@ impl IsingState{
         return s;
     }
 
-    pub fn as_bytes(&self) -> Vec<u8>{
+    /// Number of bytes needed to represent this state, using one bit per spin
+    pub fn num_bytes(&self) -> usize{
         let n = self.arr.len();
         let num_bytes = n/8 + (if n%8 == 0{ 0 } else { 1 });
-        let mut bytes_vec: Vec<u8> =(&[0]).repeat(num_bytes);
+        return num_bytes;
+    }
+    
+    pub fn write_to_bytes(&self, bytes: &mut [u8]) -> Result<(),()>{
+        if bytes.len() < self.num_bytes(){
+            return Err(())
+        }
         for (i, &si) in self.arr.iter().enumerate(){
             let bi = i / 8;
             let k = i % 8;
             unsafe {
-                let b = bytes_vec.get_unchecked_mut(bi);
-                *b |= ( if si > 0 { 0 } else {1 << k});
+                let b = bytes.get_unchecked_mut(bi);
+                *b |= if si > 0 { 0 } else {1 << k};
             }
         };
-
+        return Ok(())
+    }
+    
+    pub fn as_bytes(&self) -> Vec<u8>{
+        let mut bytes_vec: Vec<u8> =(&[0]).repeat(self.num_bytes());
+        self.write_to_bytes(bytes_vec.as_mut_slice()).unwrap_or(());
         return bytes_vec;
     }
 
