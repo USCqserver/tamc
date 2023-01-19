@@ -30,10 +30,13 @@ pub mod util;
 pub mod ising;
 pub mod percolation;
 pub mod pt;
+//pub mod sa;
+pub mod ising_results;
 use std::fs::File;
 use crate::pt::PtIcmParams;
 use std::fmt;
 use std::path::Path;
+use crate::ising::BqmIsingInstance;
 
 #[derive(Serialize, Deserialize)]
 pub struct PTOptions{
@@ -88,49 +91,29 @@ pub struct Prog{
     pub qubo: bool
 }
 
-pub fn run_program(prog: Prog) -> Result<(), Box<dyn Error>>{
-    let method_file = prog.method_file;
-    let instance_file = prog.instance_file;
-    let sample_output = prog.sample_output.unwrap_or("samples.bin".to_string());
-    let mut instance = ising::BqmIsingInstance::from_instance_file(&instance_file, prog.qubo);
-    if prog.suscepts.len() > 0{
-        instance = instance.with_suscept(&prog.suscepts);
+impl Prog{
+    pub fn read_instance(&self) -> BqmIsingInstance{
+        let instance_file = &self.instance_file;
+        let instance = ising::BqmIsingInstance::from_instance_file(&instance_file, self.qubo);
+        return instance;
     }
-    let yaml_str = std::fs::read_to_string(&method_file)
-        .map_err(|e| PTError::IoError(e, method_file.to_string() ))?;
-    let opts: Method = serde_yaml::from_str(&yaml_str)
-        .map_err(|e| PTError::MethodParse(Box::new(e), method_file.to_string()))?;
+    pub fn read_method(&self) -> Result<Method, Box<dyn Error>>{
+        let method_file = &self.method_file;
+        let yaml_str = std::fs::read_to_string(&method_file)
+            .map_err(|e| PTError::IoError(e, method_file.to_string() ))?;
+        let opts: Method = serde_yaml::from_str(&yaml_str)
+            .map_err(|e| PTError::MethodParse(Box::new(e), method_file.to_string()))?;
 
-    match opts{
+        return Ok(opts);
+    }
+}
+
+
+pub fn run_program(prog: Prog) -> Result<(), Box<dyn Error>>{
+    let opts = prog.read_method()?;
+    match &opts{
         Method::PT(pt_params) => {
-            //let results = ising::pt_icm_minimize(&instance,&pt_params);
-            println!(" ** Parallel Tempering - ICM **");
-            let pticm = pt::PtIcmRunner::new(&instance, &pt_params);
-            let results = if pt_params.threads > 1 {
-                pticm.run_parallel()
-            } else {
-                pticm.run(None)
-            };
-            let (gs_results, samp_results, _) = results;
-            println!("PT-ICM Done.");
-            println!("** Ground state energy **");
-            println!("  e = {}", gs_results.gs_energies.last().unwrap());
-            {
-                let f = File::create(prog.output_file)
-                    .expect("Failed to create yaml output file");
-                serde_yaml::to_writer(f, &gs_results)
-                    .expect("Failed to write to yaml file.")
-            }
-            {
-                let mut f = File::create(&sample_output)
-                    .expect("Failed to create sample output file");
-                let ext = Path::new(&sample_output).extension().and_then(OsStr::to_str);
-                if ext == Some("pkl"){
-                    serde_pickle::to_writer(&mut f, &samp_results, serde_pickle::SerOptions::default());
-                } else {
-                    bincode::serialize_into(&mut f, &samp_results).expect("Failed to serialize");
-                }
-            }
+            pt::run_parallel_tempering(&prog, &pt_params);
         }
     };
     Ok(())

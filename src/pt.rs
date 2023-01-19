@@ -1,7 +1,9 @@
 use std::cmp::min;
+use std::ffi::OsStr;
 use std::fmt::Formatter;
 use std::fs::File;
 use std::ops::{AddAssign, Index, IndexMut};
+use std::path::Path;
 use std::time;
 
 use fixedbitset::FixedBitSet;
@@ -22,8 +24,9 @@ use tamc_core::pt::PTState;
 use tamc_core::sa::geometric_beta_schedule;
 use tamc_core::traits::*;
 
-use crate::{Instance};
+use crate::{Instance, Prog};
 use crate::ising::{BqmIsingInstance, IsingSampler, IsingState, rand_ising_state};
+use crate::ising_results::MinResults;
 
 fn houdayer_cluster_move<R: Rng+?Sized>(replica1: &mut IsingState, replica2: &mut IsingState,
                                         graph: &Csr<(), ()>, rng: &mut R) -> Option<FixedBitSet>{
@@ -93,29 +96,19 @@ impl std::error::Error for PtError { }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PtIcmMinResults{
     pub params: PtIcmParams,
-    pub timing: f64,
-    pub gs_time_steps: Vec<u32>,
-    pub gs_energies: Vec<f32>,
-    pub gs_states: Vec<Vec<u64>>,
-    pub num_measurements: u32,
-    pub instance_size: u32,
-    pub acceptance_counts: Vec<u32>,
-    //pub final_state: Vec<PTState<IsingState>>
+    #[serde(flatten)]
+    pub min_results: MinResults,
+    pub acceptance_counts: Vec<u32>
 }
 
 impl PtIcmMinResults{
     fn new(params: PtIcmParams, num_betas: u32, instance_size: u32) -> Self{
+        let min_results = MinResults::new(num_betas, instance_size);
         let acceptance_counts = Array1::zeros(num_betas as usize).into_raw_vec();
         return Self{
             params,
-            gs_states: Vec::new(),
-            gs_energies: Vec::new(),
-            gs_time_steps: Vec::new(),
-            num_measurements: 0,
-            acceptance_counts,
-            timing: 0.0,
-            instance_size
-            //final_state: Vec::new()
+            min_results,
+            acceptance_counts
         };
     }
 }
@@ -425,12 +418,12 @@ impl<'a> PtIcmRunner<'a>{
         for i in 0..num_sweeps{
             self.apply_icm(pt_state, &mut rng_vec[0][0]);
             pt_chains_sampler.sweep(pt_state, rng_vec);
-            self.apply_measurements(i, pt_state, &mut minimum_e, &mut pt_results, &mut pt_samps);
+            self.apply_measurements(i, pt_state, &mut minimum_e, &mut pt_results.min_results, &mut pt_samps);
         }
         let end = start.elapsed();
         info!("-- PT-ICM Finished");
         info!("Duration: {:5.4} s", end.as_secs_f64());
-        pt_results.timing = end.as_micros() as f64;
+        pt_results.min_results.timing = end.as_micros() as f64;
 
         return (pt_results, pt_samps);
     }
@@ -472,12 +465,12 @@ impl<'a> PtIcmRunner<'a>{
         for i in 0..num_sweeps{
             self.apply_icm(pt_state, rng);
             pt_chains_sampler.sweep(pt_state, rng);
-            self.apply_measurements(i, pt_state, &mut minimum_e, &mut pt_results, &mut pt_samps);
+            self.apply_measurements(i, pt_state, &mut minimum_e, &mut pt_results.min_results, &mut pt_samps);
         }
         let end = start.elapsed();
         info!("-- PT-ICM Finished");
         info!("Duration: {:5.4} s", end.as_secs_f64());
-        pt_results.timing = end.as_micros() as f64;
+        pt_results.min_results.timing = end.as_micros() as f64;
 
         return (pt_results, pt_samps);
     }
@@ -519,7 +512,7 @@ impl<'a> PtIcmRunner<'a>{
     }
 
     fn apply_measurements(&self, i: u32, pt_state: &mut Vec<pt::PTState<IsingState>>,
-                          minimum_e: &mut Option<f32>, pt_results: &mut PtIcmMinResults,
+                          minimum_e: &mut Option<f32>, pt_results: &mut MinResults,
                           pt_samples: &mut PtIcmThermalSamples)
     {
 
@@ -584,8 +577,48 @@ pub fn pt_icm_minimize(instance: &BqmIsingInstance,
     }
 }
 
+
+pub fn run_parallel_tempering(prog: &Prog, params: &PtIcmParams){
+
+    let sample_output = prog.sample_output.clone().unwrap_or("samples.bin".to_string());
+    let mut instance = prog.read_instance();
+    if prog.suscepts.len() > 0{
+        instance = instance.with_suscept(&prog.suscepts);
+    }
+    //let results = ising::pt_icm_minimize(&instance,&pt_params);
+    println!(" ** Parallel Tempering - ICM **");
+    let pticm = PtIcmRunner::new(&instance, &params);
+    let results = if params.threads > 1 {
+        pticm.run_parallel()
+    } else {
+        pticm.run(None)
+    };
+    let (gs_results, samp_results, _) = results;
+    println!("PT-ICM Done.");
+    println!("** Ground state energy **");
+    println!("  e = {}", gs_results.min_results.gs_energies.last().unwrap());
+    {
+        let f = File::create(&prog.output_file)
+            .expect("Failed to create yaml output file");
+        serde_yaml::to_writer(f, &gs_results)
+            .expect("Failed to write to yaml file.")
+    }
+    {
+        let mut f = File::create(&sample_output)
+            .expect("Failed to create sample output file");
+        let ext = Path::new(&sample_output).extension().and_then(OsStr::to_str);
+        if ext == Some("pkl"){
+            serde_pickle::to_writer(&mut f, &samp_results, serde_pickle::SerOptions::default());
+        } else {
+            bincode::serialize_into(&mut f, &samp_results).expect("Failed to serialize");
+        }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
+    use itertools::Itertools;
     use ndarray::prelude::Array1;
     use rand::prelude::*;
     use rand_xoshiro::Xoshiro256PlusPlus;
@@ -615,7 +648,8 @@ mod tests {
         for _ in 0..num_betas{
             init_states.push(rand_ising_state(n, &instance, &mut rng));
         }
-        let betas = geometric_beta_schedule(beta0, betaf, num_betas);
+        let betas = geometric_beta_schedule(beta0, betaf, num_betas)
+            .into_iter().map(|x: f64| {x as f32}).collect_vec();
         let samplers: Vec<_> = betas.iter()
             .map(|&b |MetropolisSampler::new_uniform(&instance,b, n as u32))
             .collect();
@@ -629,7 +663,8 @@ mod tests {
         println!("{}", opts_str);
         let beta_arr = pt_icm_params.beta.get_beta_arr();
         let pt_results = pt_icm_minimize(&instance,  &pt_icm_params);
-        for (&e, &t) in pt_results.gs_energies.iter().zip(pt_results.gs_time_steps.iter()){
+        for (&e, &t) in pt_results.min_results.gs_energies.iter()
+                .zip(pt_results.min_results.gs_time_steps.iter()){
             println!("t={}, e = {}", t, e)
         }
         let acc_counts = Array1::from_vec(pt_results.acceptance_counts);
