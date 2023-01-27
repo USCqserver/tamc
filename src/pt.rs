@@ -311,7 +311,7 @@ impl<'a> PtIcmRunner<'a>{
         if !beta_diff.iter().all(|&x|x>=0.0) {
             panic!("beta array must be non-decreasing")
         }
-        debug!("Temperature (beta) array:\n\t {:5.4} ", beta_arr);
+
         let lo_beta_ref = beta_vec.iter().enumerate().find(|&(_, &b)| b >= params.lo_beta);
         let lo_beta_idx = match lo_beta_ref{
             None => {
@@ -322,12 +322,7 @@ impl<'a> PtIcmRunner<'a>{
                 i
             }
         };
-        info!("Number of sweeps: {}", params.num_sweeps);
-        if params.icm {
-            info!("Using ICM")
-        } else{
-            info!("ICM Disabled")
-        }
+
         // Construct csr graph
         let edges: Vec<_> = instance.coupling.iter()
             .map(|(_, (i,j))| (i as u32,j as u32)).collect();
@@ -365,6 +360,22 @@ impl<'a> PtIcmRunner<'a>{
         return (pt_results, pt_samps, pt_state);
     }
 
+    pub fn run_seeded(&self, initial_state: Option<Vec<PTState<IsingState>>>) -> (PtIcmMinResults, PtIcmThermalSamples, Vec<PTState<IsingState>>){
+        // seed and create random number generator
+        let mut rngt = thread_rng();
+        let mut seed_seq = [0u8; 32];
+        rngt.fill_bytes(&mut seed_seq);
+        let mut rng = Xoshiro256PlusPlus::from_seed(seed_seq);
+        // randomly generate initial states
+        let mut pt_state = match initial_state{
+            None => self.generate_init_state(&mut rng),
+            Some(st) => { st }
+        };
+        let (mut pt_results, pt_samps) = self.pt_loop(&mut pt_state, &mut rng);
+        self.count_acc(&pt_state, &mut pt_results);
+        //pt_results.final_state = pt_state;
+        return (pt_results, pt_samps, pt_state);
+    }
 
     pub fn run(&self, initial_state: Option<Vec<PTState<IsingState>>>) -> (PtIcmMinResults, PtIcmThermalSamples, Vec<PTState<IsingState>>){
         // seed and create random number generator
@@ -428,7 +439,7 @@ impl<'a> PtIcmRunner<'a>{
         return (pt_results, pt_samps);
     }
 
-    fn pt_loop<Rn: Rng>(
+    pub fn pt_loop<Rn: Rng>(
         &self, pt_state: &mut Vec<pt::PTState<IsingState>>,
         rng: &mut Rn
     ) -> (PtIcmMinResults, PtIcmThermalSamples)
@@ -475,7 +486,7 @@ impl<'a> PtIcmRunner<'a>{
         return (pt_results, pt_samps);
     }
 
-    fn generate_init_state<Rn: Rng+?Sized>(&self, rng: &mut Rn) -> Vec<pt::PTState<IsingState>>{
+    pub fn generate_init_state<Rn: Rng+?Sized>(&self, rng: &mut Rn) -> Vec<pt::PTState<IsingState>>{
         // randomly generate initial states
         let n = self.instance.size() as u32;
         let num_betas = self.beta_vec.len();
@@ -579,7 +590,7 @@ pub fn pt_icm_minimize(instance: &BqmIsingInstance,
 
 
 pub fn run_parallel_tempering(prog: &Prog, params: &PtIcmParams){
-
+    simple_logger::SimpleLogger::new().with_level(log::LevelFilter::Info).env().init().unwrap();
     let sample_output = prog.sample_output.clone().unwrap_or("samples.bin".to_string());
     let mut instance = prog.read_instance();
     if prog.suscepts.len() > 0{
@@ -587,6 +598,13 @@ pub fn run_parallel_tempering(prog: &Prog, params: &PtIcmParams){
     }
     //let results = ising::pt_icm_minimize(&instance,&pt_params);
     println!(" ** Parallel Tempering - ICM **");
+
+    info!("Number of sweeps: {}", params.num_sweeps);
+    if params.icm {
+        info!("Using ICM")
+    } else{
+        info!("ICM Disabled")
+    }
     let pticm = PtIcmRunner::new(&instance, &params);
     let results = if params.threads > 1 {
         pticm.run_parallel()

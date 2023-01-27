@@ -4,20 +4,36 @@ use std::io;
 use std::io::{BufRead, BufReader};
 use std::fs::File;
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::path::Path;
+use log::debug;
 use ndarray::prelude::*;
 use nom::{InputTake, IResult};
 use nom::character::complete::{digit1, space1};
 use nom::character::complete::{digit0, multispace0, space0};
 use nom::character::complete::char as nom_char;
 use nom::combinator::opt;
-use nom::multi::count;
+use nom::multi::{count, many0};
+use nom::multi::many1;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::sequence::{pair, tuple};
 use petgraph::prelude::*;
 use petgraph::csr::Csr;
 use petgraph::Undirected;
 use rand::prelude::*;
+use serde::Serialize;
 
+pub fn write_data<P: AsRef<Path>+AsRef<OsStr>, T: Serialize>(output_file: &P, ser_data: &T) -> anyhow::Result<()>{
+
+    let mut f = File::create(output_file)?;
+    let ext = Path::new(&output_file).extension().and_then(OsStr::to_str);
+    if ext == Some("pkl"){
+        serde_pickle::to_writer(&mut f, ser_data, serde_pickle::SerOptions::default())?;
+    } else {
+        bincode::serialize_into(&mut f, ser_data)?;
+    }
+    Ok(())
+}
 
 fn parse_u32(s: &str) -> IResult<&str, u32> {
     digit1(s).map(
@@ -121,6 +137,40 @@ pub fn read_txt_vec<R: io::Read>(input: R) -> Result<Vec<f64>, io::Error>
 
     Ok(dvec)
 }
+
+
+pub fn read_u32_lines<R: io::Read>(input: R) -> Result<Vec<Vec<u32>>, io::Error>
+{
+    use std::cmp::max;
+    use std::error::Error;
+
+    pub fn parse_line(line: &str) -> Result<Vec<u32>, nom::Err<nom::error::Error<&str>> >{
+        let mut float_parser = delimited(space0, parse_u32, multispace0);
+        let mut line_parser = many1(float_parser);
+        let (i, d) = line_parser(line)?;
+        return Ok(d);
+    }
+
+    let reader = BufReader::new(input);
+
+    let mut dvec : Vec<Vec<u32>> = Vec::new();
+    for (_i, line) in reader.lines().enumerate(){
+        let line = match line{Ok(l) => l, Err(e) => return Err(e)};
+        match parse_line(&line){
+            Ok(d) => {
+                dvec.push(d);
+            }
+            Err(e) =>{
+                if line.len() > 0 {
+                    debug!("Ignoring line {}: {}", _i, e);
+                }
+            }
+        }
+    };
+
+    Ok(dvec)
+}
+
 
 pub fn adj_list_to_graph(adj_list: &Vec<BTreeMap<usize, f32>>) -> Graph<f32, f32, Undirected>{
     use petgraph::prelude::NodeIndex as Nd;

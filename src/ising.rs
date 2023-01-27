@@ -3,6 +3,9 @@ use std::fmt::Formatter;
 use std::fs::File;
 use std::ops::{AddAssign, Index, IndexMut};
 use std::time;
+use std::collections::hash_set;
+use std::collections::BTreeSet;
+use std::iter::FromIterator;
 
 use fixedbitset::FixedBitSet;
 use log::{info, debug, warn};
@@ -19,6 +22,8 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sprs::{CsMat, DenseVector, TriMat};
 use itertools::Itertools;
+use petgraph::{Graph, Undirected};
+use petgraph::graph::{NodeIndex, UnGraph};
 
 use tamc_core::ensembles as ens;
 use tamc_core::metropolis::MetropolisSampler;
@@ -129,6 +134,26 @@ impl IsingState{
         };
 
         return bytes_vec;
+    }
+
+    pub fn from_u64_vec(v: &Vec<u64>, size: u32) -> Result<Self, ()>{
+        let size = size as usize;
+        let num_bytes = size/64 + (if size%64 == 0{ 0 } else { 1 });
+        if num_bytes  > v.len(){
+            return Err(())
+        }
+        let mut arr = Vec::with_capacity(size);
+        arr.resize(size, -1);
+        for i in 0..size{
+            let bi = i / 64;
+            let k = (i % 64) as u64;
+            unsafe{
+                let &b = v.get_unchecked(bi);
+                let si = arr.get_unchecked_mut(i);
+                *si = if (b>>k)&1u64!=0 { -1 } else { 1 };
+            }
+        }
+        return Ok(IsingState{arr, energy: 0.0, energy_init: false});
     }
 
     pub fn overlap(&self, other: &IsingState) -> i64 {
@@ -297,6 +322,69 @@ impl BqmIsingInstance{
         let coupling = tri_mat.to_csr();
         return Self{offset, bias, coupling, coupling_vecs, suscept_coefs: Vec::new() };
     }
+    /// Create a new instance induced from a subgraph of this instance
+    /// sub_nodes must be sorted
+    pub fn induced_subgraph_instance_sorted(&self, sub_nodes: &Vec<u32>) -> Self{
+        let n2 = sub_nodes.len();
+        let offset = 0.0;
+        let mut bias = Vec::with_capacity(n2);
+        let mut tri_mat = TriMat::new((n2, n2));
+        let mut coupling_vecs = Vec::with_capacity(n2);
+        for (i, &ni) in sub_nodes.iter().enumerate(){
+            bias.push(self.bias[ni as usize]);
+            let neigh = &self.coupling_vecs[ni as usize];
+            let mut neigh2 = Vec::new();
+            for &( j0, K) in neigh.iter(){
+                if let Ok(j) = sub_nodes.binary_search(&j0){
+                    tri_mat.add_triplet(i, j as usize, K);
+                    neigh2.push((j as u32, K));
+                }
+            }
+            coupling_vecs.push(neigh2);
+        }
+        let mut suscept_coefs = Vec::with_capacity(self.suscept_coefs.len());
+        for sc in self.suscept_coefs.iter(){
+            let mut sc2 = Vec::with_capacity(n2);
+            for &ni in sub_nodes.iter(){
+                sc2.push(sc[ni as usize]);
+            }
+            suscept_coefs.push(sc2);
+        }
+        let coupling = tri_mat.to_csr();
+        return Self{offset, bias, coupling, coupling_vecs, suscept_coefs};
+    }
+
+    pub fn induced_subgraph_instance(&self, sub_nodes: &BTreeSet<u32>) -> Self{
+        let n2 = sub_nodes.len();
+        let offset = 0.0;
+        let mut bias = Vec::with_capacity(n2);
+        let mut tri_mat = TriMat::new((n2, n2));
+        let mut coupling_vecs = Vec::with_capacity(n2);
+        for (i, &ni) in sub_nodes.iter().enumerate(){
+            bias[i] = self.bias[ni as usize];
+            let neigh = &self.coupling_vecs[ni as usize];
+            let mut neigh2 = Vec::new();
+            for &( j, K) in neigh.iter(){
+                if sub_nodes.contains(&j){
+                    tri_mat.add_triplet(i, j as usize, K);
+                    neigh2.push((j, K));
+                }
+            }
+            coupling_vecs.push(neigh2);
+        }
+
+        let mut suscept_coefs = Vec::with_capacity(self.suscept_coefs.len());
+        for sc in self.suscept_coefs.iter(){
+            let mut sc2 = Vec::with_capacity(n2);
+            for &ni in sub_nodes.iter(){
+                sc2.push(sc[ni as usize]);
+            }
+            suscept_coefs.push(sc2);
+        }
+        let coupling = tri_mat.to_csr();
+        return Self{offset, bias, coupling, coupling_vecs, suscept_coefs};
+    }
+
     pub fn with_suscept(self, suscept_files: &Vec<String>) -> Self{
         let mut me = self;
         for file in suscept_files.iter(){
@@ -319,6 +407,19 @@ impl BqmIsingInstance{
         let edges: Vec<_> = self.coupling.iter()
             .map(|(_, (i,j))| (i as u32,j as u32)).collect();
         let g: Csr<(), ()> = Csr::from_sorted_edges(&edges).unwrap();
+
+        return g;
+    }
+
+    pub fn to_energy_graph(&self) -> UnGraph<f32, f32>{
+        // Construct csr graph
+        let edges: Vec<_> = self.coupling.iter()
+            .map(|(&K, (i,j))| (i as u32, j as u32, K)).collect();
+        let edges = edges.into_iter().filter(|&(i, j,_)| i < j).collect_vec();
+        let mut g: UnGraph<f32, f32> = UnGraph::from_edges(&edges);
+        for (i, &h) in self.bias.iter().enumerate(){
+            g[NodeIndex::new(i)] = h;
+        }
 
         return g;
     }

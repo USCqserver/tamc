@@ -160,6 +160,7 @@ Duration per replica: {:5.4e} s
 }
 
 pub fn run_simulated_annealing(prog: &Prog, params: &SaParams){
+    simple_logger::SimpleLogger::new().with_level(log::LevelFilter::Info).env().init().unwrap();
     let mut instance = prog.read_instance();
     let sa_runner = SaRunner::new(&instance, &params);
     println!(" ** Simulated Annealing **");
