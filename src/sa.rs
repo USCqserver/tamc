@@ -4,6 +4,7 @@ use std::path::Path;
 use ndarray::prelude::*;
 use serde::{Serialize, Deserialize};
 use petgraph::csr::Csr;
+use rayon::prelude::*;
 use crate::pt::BetaOptions;
 use crate::ising::{Spin, BqmIsingInstance, IsingState, rand_ising_state};
 use rand::distributions::Uniform;
@@ -42,6 +43,15 @@ impl AnnealMinResults {
         };
     }
 
+    fn combine(vec_results : Vec<AnnealMinResults>) -> Self{
+        let params = vec_results.first().unwrap().params.clone();
+        let timing: f64 = vec_results.iter()
+            .map(|x| x.timing).sum();
+        let min_energy = vec_results.iter().map(|x|x.min_energy)
+            .min_by(|x,y|x.partial_cmp(y).unwrap()).unwrap();
+        let energies = vec_results.into_iter().map(|x|x.energies).concat();
+        return Self{params, timing, min_energy, energies};
+    }
     fn apply_measurements(&mut self, instance: &BqmIsingInstance, sa_state: &mut Vec<IsingState>)
     {
         let energies: Vec<f32> = sa_state.iter().map(|st| instance.energy_ref(st)).collect();
@@ -105,11 +115,52 @@ impl<'a> SaRunner<'a>{
         let mut rng = Xoshiro256PlusPlus::from_seed(seed_seq);
         // randomly generate initial states
         let mut sa_state = match initial_state{
-            None => self.generate_init_state(&mut rng),
+            None => self.generate_init_state(&mut rng, None),
             Some(st) => { st }
         };
+        info!("-- SA begin");
         let mut sa_results = self.sa_loop(&mut sa_state, &mut rng);
+        info!("-- SA Finished");
+        let t_us = sa_results.timing;
+        let t_sec = t_us * (1e6);
+        info!(r"
+Duration: {:5.4} s
+Duration per replica: {:5.4e} s
+",
+            t_sec, t_sec / (self.params.num_replicas as f64));
         //pt_results.final_state = pt_state;
+        return (sa_results, sa_state);
+    }
+
+
+    pub fn run_parallel(&self, initial_state: Option<Vec<Vec<IsingState>>>) -> (AnnealMinResults, Vec<IsingState>){
+        // seed and create random number generator
+        let mut rngt = thread_rng();
+        let mut seed_seq = [0u8; 32];
+        rngt.fill_bytes(&mut seed_seq);
+        let mut rng = Xoshiro256PlusPlus::from_seed(seed_seq);
+        let mut rng_vec = Vec::with_capacity(self.params.threads as usize);
+        for _ in 0..self.params.threads{
+            rng_vec.push(rng.clone());
+            rng.jump();
+        }
+        let reps_per_thread =self.params.num_replicas / self.params.threads;
+        // randomly generate initial states
+        let mut sa_state = match initial_state{
+            None => {
+                rng_vec.iter_mut().map(|rng| self.generate_init_state(rng, Some(reps_per_thread)))
+                    .collect_vec() },
+            Some(st) => { st }
+        };
+        let mut sa_results_vec = Vec::with_capacity(self.params.threads as usize);
+        sa_state.par_iter_mut().zip_eq(rng_vec.par_iter_mut())
+            .map(|(state, rng)| self.sa_loop(state, rng))
+            .collect_into_vec(&mut sa_results_vec);
+        let mut sa_results = AnnealMinResults::combine(sa_results_vec);
+        // set the actual number of replicas simulated
+        sa_results.params.num_replicas = self.params.threads * reps_per_thread;
+        //pt_results.final_state = pt_state;
+        let sa_state = sa_state.into_iter().concat();
         return (sa_results, sa_state);
     }
 
@@ -123,14 +174,14 @@ impl<'a> SaRunner<'a>{
         let n = self.instance.size() as u32;
         let sampler = MetropolisSampler::new_uniform(self.instance,beta0, n);
 
-        info!("-- SA begin");
+
         let start = time::Instant::now();
         sa::simulated_annealing(
             sampler, sa_state, &self.beta_vec, rng,
             |_, _| { }
         );
         let end = start.elapsed();
-        info!("-- SA Finished");
+
         let t_sec = end.as_secs_f64();
         let t_us = end.as_micros() as f64;
         info!(r"
@@ -147,10 +198,10 @@ Duration per replica: {:5.4e} s
         return sa_results;
     }
 
-    fn generate_init_state<Rn: Rng+?Sized>(&self, rng: &mut Rn) -> Vec<IsingState>{
+    fn generate_init_state<Rn: Rng+?Sized>(&self, rng: &mut Rn, num_replicas: Option<u32>) -> Vec<IsingState>{
         // randomly generate initial states
         let n = self.instance.size();
-        let num_replicas = self.params.num_replicas;
+        let num_replicas = num_replicas.unwrap_or(self.params.num_replicas);
         let mut sa_states = Vec::with_capacity(num_replicas as usize);
         for _ in 0..num_replicas{
             sa_states.push(rand_ising_state(n as u32, self.instance, rng));
@@ -163,8 +214,14 @@ pub fn run_simulated_annealing(prog: &Prog, params: &SaParams){
     simple_logger::SimpleLogger::new().with_level(log::LevelFilter::Info).env().init().unwrap();
     let mut instance = prog.read_instance();
     let sa_runner = SaRunner::new(&instance, &params);
-    println!(" ** Simulated Annealing **");
-    let (min_results, final_states) = sa_runner.run(None);
+    info!(" ** Simulated Annealing **");
+    let (min_results, final_states) =
+        if params.num_replicas > 1{
+            info!("Running multi-threaded SA");
+            sa_runner.run_parallel(None)
+        } else {
+            sa_runner.run(None)
+        };
 
     let sample_output = prog.sample_output.clone().unwrap_or("samples.bin".to_string());
     let ngs = min_results.energies.iter()
