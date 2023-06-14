@@ -615,6 +615,10 @@ pub fn run_parallel_tempering(prog: &Prog, params: &PtIcmParams){
     println!("PT-ICM Done.");
     println!("** Ground state energy **");
     println!("  e = {}", gs_results.min_results.gs_energies.last().unwrap());
+    let &nsw = gs_results.min_results.gs_time_steps.last().unwrap();
+    let pct_rem = ((params.num_sweeps - nsw) as f64) / (params.num_sweeps as f64);
+    println!("  nsw = {}", nsw);
+    println!("  % remaining = {:4.3}%", pct_rem*100.0);
     {
         let f = File::create(&prog.output_file)
             .expect("Failed to create yaml output file");
