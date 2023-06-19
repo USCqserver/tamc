@@ -262,6 +262,7 @@ pub struct PtIcmParams {
     pub warmup_fraction: f64,
     pub beta: BetaOptions,
     pub lo_beta: f32,
+    pub lo_num_beta: Option<u32>,
     pub icm: bool,
     pub num_replica_chains: u32,
     pub threads: u32,
@@ -277,6 +278,7 @@ impl Default for PtIcmParams{
             warmup_fraction: 0.5,
             beta: BetaOptions::Geometric(BetaSpec{beta_min:0.1, beta_max:10.0, num_beta: 8}),
             lo_beta: 1.0,
+            lo_num_beta: None,
             icm: true,
             num_replica_chains: 2,
             threads: 1,
@@ -311,17 +313,25 @@ impl<'a> PtIcmRunner<'a>{
         if !beta_diff.iter().all(|&x|x>=0.0) {
             panic!("beta array must be non-decreasing")
         }
-
-        let lo_beta_ref = beta_vec.iter().enumerate().find(|&(_, &b)| b >= params.lo_beta);
-        let lo_beta_idx = match lo_beta_ref{
-            None => {
-                warn!("Note: lo_beta={} is out of bounds. The largest beta value will be assigned.", params.lo_beta);
-                num_betas-1
+        let lo_beta_idx;
+        if let Some(lo_num_beta) = params.lo_num_beta{
+            let lo_num_beta = (lo_num_beta as usize).min(num_betas);
+            lo_beta_idx = num_betas - lo_num_beta;
+            if params.icm && lo_num_beta > 0 {
+                info!("ICM will use largest {} betas.", lo_num_beta)
             }
-            Some((i, _)) => {
-                i
-            }
-        };
+        } else {
+            let lo_beta_ref = beta_vec.iter().enumerate().find(|&(_, &b)| b >= params.lo_beta);
+            lo_beta_idx = match lo_beta_ref{
+                None => {
+                    warn!("Note: lo_beta={} is out of bounds. The largest beta value will be assigned.", params.lo_beta);
+                    num_betas-1
+                }
+                Some((i, _)) => {
+                    i
+                }
+            };
+        }
 
         // Construct csr graph
         let edges: Vec<_> = instance.coupling.iter()
