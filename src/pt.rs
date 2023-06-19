@@ -261,7 +261,7 @@ pub struct PtIcmParams {
     pub num_sweeps: u32,
     pub warmup_fraction: f64,
     pub beta: BetaOptions,
-    pub lo_beta: f32,
+    pub lo_beta: Option<f32>,
     pub lo_num_beta: Option<u32>,
     pub icm: bool,
     pub num_replica_chains: u32,
@@ -277,7 +277,7 @@ impl Default for PtIcmParams{
             num_sweeps: 256,
             warmup_fraction: 0.5,
             beta: BetaOptions::Geometric(BetaSpec{beta_min:0.1, beta_max:10.0, num_beta: 8}),
-            lo_beta: 1.0,
+            lo_beta: None,
             lo_num_beta: None,
             icm: true,
             num_replica_chains: 2,
@@ -314,24 +314,31 @@ impl<'a> PtIcmRunner<'a>{
             panic!("beta array must be non-decreasing")
         }
         let lo_beta_idx;
+
         if let Some(lo_num_beta) = params.lo_num_beta{
             let lo_num_beta = (lo_num_beta as usize).min(num_betas);
             lo_beta_idx = num_betas - lo_num_beta;
             if params.icm && lo_num_beta > 0 {
                 info!("ICM will use largest {} betas.", lo_num_beta)
             }
-        } else {
-            let lo_beta_ref = beta_vec.iter().enumerate().find(|&(_, &b)| b >= params.lo_beta);
+        } else if let Some(lo_beta) = params.lo_beta {
+            //let lo_beta = params.lo_beta.unwrap_or(1.0);
+            let lo_beta_ref = beta_vec.iter().enumerate().find(|&(_, &b)| b >= lo_beta);
             lo_beta_idx = match lo_beta_ref{
                 None => {
-                    warn!("Note: lo_beta={} is out of bounds. The largest beta value will be assigned.", params.lo_beta);
+                    warn!("Note: lo_beta={} is out of bounds. The largest beta value will be assigned.", lo_beta);
                     num_betas-1
                 }
                 Some((i, _)) => {
                     i
                 }
             };
-        }
+        } else {
+            lo_beta_idx=0;
+            if params.icm{
+                panic!("Must specify either lo_beta or lo_num_beta for ICM")
+            }
+         }
 
         // Construct csr graph
         let edges: Vec<_> = instance.coupling.iter()
